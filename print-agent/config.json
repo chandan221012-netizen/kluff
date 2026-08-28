@@ -1,4 +1,4 @@
 {
-  "deviceId": "DEV_WIN_001",
-  "deviceToken": "mock_dev_token_for_testing"
+  "serverUrl": "https://paver-correct-slurp.ngrok-free.dev",
+  "shopToken": "f384031a-5b00-4af6-8049-867c3fc3c574"
 }

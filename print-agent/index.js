@@ -1,132 +1,175 @@
-const io = require('socket.io-client');
-const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { print, getPrinters } = require('pdf-to-printer');
+const os = require('os');
+const readline = require('readline');
+const io = require('socket.io-client');
+const { print } = require('pdf-to-printer');
+const axios = require('axios');
 
-// Load device config
-let config = {};
-try {
-  config = require('./config.json');
-} catch (err) {
-  console.error('Error loading config.json. Ensure file exists.');
-  process.exit(1);
+const CONFIG_PATH = path.join(process.cwd(), 'config.json');
+
+// Extract SumatraPDF binary out of pkg snapshot to real filesystem
+function getSumatraBinaryPath() {
+  const sumatraFilename = 'SumatraPDF-3.4.6-32.exe';
+
+  // Path inside pkg snapshot
+  const snapshotPath = path.join(__dirname, 'node_modules', 'pdf-to-printer', 'dist', sumatraFilename);
+
+  // Real temp directory on target PC
+  const tempDir = path.join(os.tmpdir(), 'kluff-print-agent');
+  const targetPath = path.join(tempDir, sumatraFilename);
+
+  try {
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+
+    if (fs.existsSync(snapshotPath) && !fs.existsSync(targetPath)) {
+      fs.copyFileSync(snapshotPath, targetPath);
+    }
+  } catch (err) {
+    console.error('[Binary Extract Error]:', err.message);
+  }
+
+  return targetPath;
 }
 
-const SERVER_URL = process.env.SERVER_URL || 'http://localhost:5000';
-const TEMP_DIR = path.join(__dirname, 'temp_print_queue');
+const sumatraPdfPath = getSumatraBinaryPath();
 
-// Ensure temporary folder exists
-if (!fs.existsSync(TEMP_DIR)) {
-  fs.mkdirSync(TEMP_DIR, { recursive: true });
-}
+async function getConfig() {
+  if (fs.existsSync(CONFIG_PATH)) {
+    return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  }
 
-console.log('Starting Windows Print Agent...');
-console.log(`Connecting to server at ${SERVER_URL}...`);
-
-// Connect to WebSocket Server with device auth token
-const socket = io(SERVER_URL, {
-  auth: { token: config.deviceToken },
-  reconnection: true,
-  reconnectionAttempts: Infinity,
-  reconnectionDelay: 2000
-});
-
-socket.on('connect', async () => {
-  console.log('Connected successfully to Backend Server!');
-  await logAvailablePrinters();
-});
-
-socket.on('connect_error', (err) => {
-  console.error('Connection failed:', err.message);
-});
-
-socket.on('disconnect', () => {
-  console.warn('Disconnected from server. Retrying connection in background...');
-});
-
-// Receive Print Job from Backend
-socket.on('print-job', async (job) => {
-  console.log(`\n--- New Print Job Received ---`);
-  console.log(`Job ID: ${job.jobId}`);
-  console.log(`Printer: ${job.printerName || job.printerId}`);
-  console.log(`Copies: ${job.copies} | Color Mode: ${job.colorMode}`);
-
-  // Notify server that printing has started
-  socket.emit('job-status-update', { 
-    jobId: job.jobId, 
-    status: 'PRINTING' 
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
   });
 
-  const tempFilePath = path.join(TEMP_DIR, `${job.jobId}.pdf`);
+  const question = (query) => new Promise((resolve) => rl.question(query, resolve));
 
-  try {
-    // 1. Download file from backend server
-    console.log(`Downloading file from: ${job.fileUrl}`);
-    const response = await axios({
-      url: job.fileUrl,
-      method: 'GET',
-      responseType: 'stream'
-    });
+  console.log('=== Kluff Print Agent First-Time Setup ===\n');
+  const serverUrl = await question('Enter Kluff Server URL (e.g. https://your-domain.ngrok-free.app): ');
+  const shopToken = await question('Enter your Shop QR Token: ');
 
-    const writer = fs.createWriteStream(tempFilePath);
-    response.data.pipe(writer);
+  rl.close();
 
-    await new Promise((resolve, reject) => {
-      writer.on('finish', resolve);
-      writer.on('error', reject);
-    });
-    console.log('File downloaded successfully.');
+  const config = { serverUrl: serverUrl.trim(), shopToken: shopToken.trim() };
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  console.log('\nConfig saved to config.json!\n');
+  return config;
+}
 
-    // 2. Configure Windows printing options
-    const printOptions = {
-      printer: job.printerName,
-      copies: Number(job.copies) || 1,
-      monochrome: job.colorMode === 'bw'
-    };
+async function startAgent() {
+  const config = await getConfig();
 
-    if (job.pages && job.pages !== 'all') {
-      printOptions.pages = job.pages;
+  console.log(`[Kluff Agent] Connecting to server: ${config.serverUrl}...`);
+
+  const socket = io(config.serverUrl, {
+    transports: ['websocket', 'polling'],
+    auth: {
+      token: config.shopToken,
+      qrToken: config.shopToken
+    },
+    query: {
+      token: config.shopToken
+    },
+    extraHeaders: {
+      "ngrok-skip-browser-warning": "true"
+    }
+  });
+
+  socket.on('connect_error', (err) => {
+    console.error(`[Kluff Agent Error] Connection failed: ${err.message}`);
+  });
+
+  socket.on('error', (err) => {
+    console.error(`[Kluff Agent Socket Error]: ${err.message}`);
+  });
+
+  socket.on('connect', () => {
+    console.log('[Kluff Agent] Connected to Kluff Cloud Server successfully!');
+  });
+
+  socket.on('print-job', async (job) => {
+    // Determine the target printer name cleanly
+    let printerTarget = job.systemPrinterName;
+
+    // Fallback logic if systemPrinterName isn't provided directly
+    if (!printerTarget && job.printerId && !job.printerId.startsWith('PRINTER_')) {
+      printerTarget = job.printerId;
     }
 
-    // 3. Dispatch to Windows Spooler
-    console.log(`Sending document to printer: "${job.printerName}"...`);
-    await print(tempFilePath, printOptions);
-    console.log(`Job ${job.jobId} completed successfully!`);
+    console.log(`[Job Received] ID: ${job.jobId} | Target Printer: ${printerTarget || 'Windows Default Printer'}`);
 
-    // 4. Update status on backend
-    socket.emit('job-status-update', { 
-      jobId: job.jobId, 
-      status: 'COMPLETED' 
-    });
+    const tempPath = path.join(process.cwd(), `temp_${job.jobId}.pdf`);
 
-  } catch (err) {
-    console.error(`Failed to execute print job ${job.jobId}:`, err.message);
+    try {
+      // Clean up targetUrl (removes any stray "SERVER_URL=" prefixes)
+      let targetUrl = job.fileUrl || '';
+      targetUrl = targetUrl.replace(/^SERVER_URL=/, '').trim();
 
-    socket.emit('job-status-update', { 
-      jobId: job.jobId, 
-      status: 'FAILED', 
-      errorMessage: err.message 
-    });
-  } finally {
-    // Clean up temporary downloaded file
-    if (fs.existsSync(tempFilePath)) {
-      try {
-        fs.unlinkSync(tempFilePath);
-      } catch (e) {
-        console.error('Failed to clean up temp file:', e.message);
+      if (!targetUrl && job.filePath) {
+        const cleanServer = config.serverUrl.replace(/\/$/, '');
+        const cleanPath = job.filePath.replace(/^\//, '');
+        targetUrl = `${cleanServer}/uploads/${cleanPath}`;
+      }
+
+      console.log(`[Downloading PDF]: ${targetUrl}`);
+
+      const response = await axios({
+        method: 'GET',
+        url: targetUrl,
+        responseType: 'arraybuffer',
+        headers: {
+          'ngrok-skip-browser-warning': 'true'
+        }
+      });
+
+      fs.writeFileSync(tempPath, response.data);
+
+      // Build print options dynamically
+      const printOptions = {
+        copies: job.copies || 1,
+        sumatraPdfPath: sumatraPdfPath
+      };
+
+      // Only pass printer parameter if we have a valid system printer name
+      if (printerTarget) {
+        printOptions.printer = printerTarget;
+      }
+
+      // Print PDF via Windows Spooler
+      await print(tempPath, printOptions);
+
+      console.log(`[Job Completed] ID: ${job.jobId}`);
+      socket.emit('job-status-update', { jobId: job.jobId, status: 'COMPLETED' });
+
+    } catch (err) {
+      console.error(`[Job Failed] ${err.message}`);
+      socket.emit('job-status-update', { jobId: job.jobId, status: 'FAILED', errorMessage: err.message });
+    } finally {
+      if (fs.existsSync(tempPath)) {
+        try { fs.unlinkSync(tempPath); } catch (e) { }
       }
     }
-  }
+  });
+
+  
+  socket.on('disconnect', (reason) => {
+    console.log(`[Kluff Agent] Disconnected from server (${reason}). Retrying...`);
+  });
+}
+
+// Global Process Error Handlers to keep process alive
+process.on('uncaughtException', (err) => {
+  console.error('[CRITICAL AGENT ERROR]:', err);
 });
 
-// Helper function to list installed printers on the system
-async function logAvailablePrinters() {
-  try {
-    const printers = await getPrinters();
-    console.log('\nInstalled Windows Printers detected on this PC:');
-    printers.forEach((p) => console.log(` - ${p.name} (Device ID: ${p.deviceId})`));
-  } catch (err) {
-    console.error('Unable to fetch Windows printers:', err.message);
-  }
-}
+process.on('unhandledRejection', (reason) => {
+  console.error('[CRITICAL ASYNC ERROR]:', reason);
+});
+
+startAgent().catch((err) => {
+  console.error('[AGENT STARTUP FAILED]:', err);
+});

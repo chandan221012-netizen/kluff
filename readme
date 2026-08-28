@@ -1,0 +1,36 @@
+net start MongoDB
+Customer QR Landing / Upload: http://localhost:5173/print/:token
+
+Test Route (Default QR Shop): http://localhost:5173/test
+
+Shop Owner Login: http://localhost:5173/login
+
+Shop Owner Registration: http://localhost:5173/register
+
+Shop Owner Control Panel: http://localhost:5173/dashboard
+
+
+
+
+Terminal Layout
+Terminal 1 (Backend Server): * Directory: kluff/server
+
+Command: npm run dev
+
+Status: Running on port 5000 with MongoDB connected.
+
+Terminal 2 (Tunnel to Internet) — RUN HERE:
+
+Directory: Anywhere in your project (kluff)
+
+Command: lt --port 5000
+
+Status: Generates your public HTTPS URL (e.g., https://funny-cats-swim.loca.lt).
+
+Terminal 3 (Frontend React App):
+
+Directory: kluff/client
+
+Command: npm run dev
+
+Status: Running Vite on http://localhost:5173.
