@@ -8,13 +8,14 @@
 ## 📑 Table of Contents
 1. [Architecture Overview](#-architecture-overview)
 2. [Print Agent Architecture & Specification](#-print-agent-architecture--specification)
-3. [Key Features Implemented](#-key-features-implemented)
-4. [Folder & Project Structure](#-folder--project-structure)
-5. [Tech Stack](#-tech-stack)
-6. [Getting Started & Local Setup](#-getting-started--local-setup)
-7. [Windows Desktop Print Agent Installation](#-windows-desktop-print-agent-installation)
-8. [API & WebSocket Specifications](#-api--websocket-specifications)
-9. [Changelog & Recent Milestones](#-changelog--recent-milestones)
+3. [Implementation Plan: Hardware Routing & Agent UI](#-implementation-plan-hardware-routing--agent-ui)
+4. [Key Features Implemented](#-key-features-implemented)
+5. [Folder & Project Structure](#-folder--project-structure)
+6. [Tech Stack](#-tech-stack)
+7. [Getting Started & Local Setup](#-getting-started--local-setup)
+8. [Windows Desktop Print Agent Installation](#-windows-desktop-print-agent-installation)
+9. [API & WebSocket Specifications](#-api--websocket-specifications)
+10. [Changelog & Recent Milestones](#-changelog--recent-milestones)
 
 ---
 
@@ -135,6 +136,37 @@ To guarantee 24/7 reliability in retail shops without operator intervention, thr
 * `install-service.bat`: One-click administrative setup. Registers Task Scheduler tasks, creates XML definitions, and enables High-Performance Power Plan.
 * `uninstall-service.bat`: Cleans up and deletes Task Scheduler tasks and restores default balanced power plan.
 * `watchdog.vbs`: Headless, silent VBScript executed every 5 minutes by Task Scheduler. Queries WMI process list for `KluffPrintAgent.exe` and restarts it if closed.
+
+---
+
+## 📋 Implementation Plan: Hardware Routing & Agent UI
+
+### 1. Embedded Operator Web UI & Server (`http://localhost:5050`)
+* **Zero External Dependencies:** Built natively inside `print-agent/index.js` using Node's standard `http` module.
+* **Auto-Launch:** Automatically opens `http://localhost:5050` in the shopkeeper's browser on startup (suppressed in headless/service mode).
+* **Core Operator Endpoints:**
+  * `GET /api/status`: Real-time cloud connectivity status, Socket ID, queue count, and live log stream.
+  * `GET /api/printers`: List of discovered Windows printers and active role assignments.
+  * `POST /api/printers/assign`: Update hardware printer assignments dynamically in `config.json` without process restarts.
+  * `POST /api/test-print`: 1-click test calibration sheet dispatched to any selected hardware printer.
+  * `GET /api/queue`: Real-time queue view with options to retry or clear jobs.
+
+### 2. Windows Native Hardware Printer Discovery
+* **Asynchronous WMI Query:**
+  ```powershell
+  Get-CimInstance Win32_Printer | Select-Object Name, Default, PrinterStatus, PortName
+  ```
+* Identifies all USB, Network, and Virtual printers installed on the Windows PC.
+* Automatically designates the system `Default` printer as fallback if no custom mappings are configured.
+
+### 3. Role-Based Dynamic Routing Engine
+When a job arrives from the cloud, the agent resolves the physical printer in the following hierarchy:
+1. Specific `job.systemPrinterName` (if requested).
+2. `largeFormatPrinter` (if paper size is A3, A2, or A1).
+3. `photoPrinter` (if `jobType === 'photo'`).
+4. `colorPrinter` (if `colorMode === 'color'`).
+5. `bwPrinter` (if `colorMode === 'bw'`).
+6. Fallback to `config.printers.defaultPrinter` or system default printer.
 
 ---
 
