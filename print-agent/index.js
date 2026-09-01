@@ -602,6 +602,13 @@ async function startAgent() {
   log.info('   AUTOPRINT Desktop Agent — Starting...');
   log.info('════════════════════════════════════════════════════════');
 
+  // Auto-hide console window on Windows (unless --show-console is passed)
+  if (process.platform === 'win32' && !process.argv.includes('--show-console') && !process.argv.includes('--debug')) {
+    try {
+      exec(`powershell -WindowStyle Hidden -Command "$w = Add-Type -MemberDefinition '[DllImport(\\"user32.dll\\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);' -Name W -PassThru; $h = (Get-Process -Id ${process.pid}).MainWindowHandle; if ($h) { [W]::ShowWindow($h, 0) }"`, () => {});
+    } catch (_) {}
+  }
+
   // Cleanup orphaned temp files from previous crashed sessions
   cleanupOrphanedTempFiles();
 
