@@ -7,13 +7,14 @@
 
 ## 📑 Table of Contents
 1. [Architecture Overview](#-architecture-overview)
-2. [Key Features Implemented](#-key-features-implemented)
-3. [Folder & Project Structure](#-folder--project-structure)
-4. [Tech Stack](#-tech-stack)
-5. [Getting Started & Local Setup](#-getting-started--local-setup)
-6. [Windows Desktop Print Agent Installation](#-windows-desktop-print-agent-installation)
-7. [API & WebSocket Specifications](#-api--websocket-specifications)
-8. [Changelog & Recent Milestones](#-changelog--recent-milestones)
+2. [Print Agent Architecture & Specification](#-print-agent-architecture--specification)
+3. [Key Features Implemented](#-key-features-implemented)
+4. [Folder & Project Structure](#-folder--project-structure)
+5. [Tech Stack](#-tech-stack)
+6. [Getting Started & Local Setup](#-getting-started--local-setup)
+7. [Windows Desktop Print Agent Installation](#-windows-desktop-print-agent-installation)
+8. [API & WebSocket Specifications](#-api--websocket-specifications)
+9. [Changelog & Recent Milestones](#-changelog--recent-milestones)
 
 ---
 
@@ -48,6 +49,95 @@ flowchart TD
 
 ---
 
+## 🖨 Print Agent Architecture & Specification
+
+The **AutoPrint Desktop Agent** (`print-agent/`) bridges cloud-based print requests with physical Windows desktop printer spoolers. It requires zero printer drivers in the cloud and zero cloud exposure on the shop's local area network.
+
+```mermaid
+flowchart TD
+    subgraph Cloud Infrastructure
+        CS[Cloud Server - Node.js / Express] <-->|Socket.io TLS WSS| WSClient[Agent Socket Client]
+    end
+
+    subgraph Desktop Agent Internal Core
+        WSClient --> QueueManager[Local Persistent Job Queue: job-queue.json]
+        QueueManager --> Semaphore[Concurrent Job Semaphore: Max 2]
+        Semaphore --> Router[Dynamic Printer Role Router]
+        
+        subgraph Hardware Discovery & Spooling
+            Discovery[PowerShell Get-CimInstance Win32_Printer] --> Router
+            Router --> Transformer[PDF & Image Dimension Transformer: pdf-lib]
+            Transformer --> Spooler[SumatraPDF Silent CLI / Win32 Spooler]
+        end
+
+        subgraph Local Operator Dashboard
+            HTTPServer[Built-in Lightweight HTTP Server :5050] <--> Router
+            HTTPServer <--> QueueManager
+            Browser[Local Browser Operator UI] <--> HTTPServer
+        end
+    end
+
+    subgraph Physical Hardware
+        Spooler --> DefaultP[System Default Printer]
+        Spooler --> BWPrinter[Monochrome Laser Printer]
+        Spooler --> ColorPrinter[Color Inkjet / Laser Printer]
+        Spooler --> PhotoPrinter[Dedicated Photo / Glossy Printer]
+    end
+
+    subgraph Windows Service Lifecycle
+        TaskSched[Windows Task Scheduler: AutoPrintAgent] -->|Boot Trigger| AgentProcess[KluffPrintAgent.exe]
+        Watchdog[Windows Task Scheduler: AutoPrintWatchdog] -->|Every 5 Mins| VBScript[watchdog.vbs]
+        VBScript -->|WMI Process Check & Revive| AgentProcess
+    end
+```
+
+### 1. Socket Client & Auto-Healing Sync (`index.js`)
+* **Persistent Bi-Directional Stream:** Connects to the cloud server via Socket.io with aggressive reconnection (`reconnectionDelay: 1000`, `reconnectionDelayMax: 5000`).
+* **Initial Sync Request (`agent-request-pending-jobs`):** Immediately on connect/reconnect, broadcasts the agent's registration and requests any pending or stale jobs that were created while the agent PC was offline.
+* **Download Retry Engine:** Implements exponential backoff (3 attempts) with integrity checks to download PDF/image assets safely before submitting to Windows spooler.
+
+### 2. Local Queue Manager (`job-queue.json`)
+* Protects print jobs against unexpected PC shutdowns, power cuts, or network dropouts.
+* Incoming jobs are immediately persisted to `job-queue.json`.
+* State transitions: `QUEUED` ➔ `DOWNLOADING` ➔ `SPOOLING` ➔ `COMPLETED` / `FAILED`.
+* Completed jobs are archived and local temporary download caches are purged.
+
+### 3. Hardware Discovery & Role-Based Routing
+* Discovers installed physical and network printers dynamically via PowerShell:
+  ```powershell
+  Get-CimInstance Win32_Printer | Select-Object Name, Default, PrinterStatus, PortName
+  ```
+* **Dynamic Role Matrix (`config.json`):**
+  * `defaultPrinter`: Fallback for general jobs.
+  * `bwPrinter`: Automatically assigned to black-and-white impressions.
+  * `colorPrinter`: Automatically assigned to color impressions.
+  * `photoPrinter`: Assigned when customer selects photo print mode.
+  * `largeFormatPrinter`: Assigned for A3, A2, or A1 paper formats.
+
+### 4. Built-In Local Web UI (`http://localhost:5050`)
+* Zero external web framework dependencies — runs directly on Node's native HTTP engine.
+* **REST APIs:**
+  * `GET /api/status`: Real-time cloud connectivity status, queue counts, and recent logs.
+  * `GET /api/printers`: Discovered hardware printers and active role assignments.
+  * `POST /api/printers/assign`: Updates printer routing rules on the fly without restarting the agent.
+  * `POST /api/test-print`: Sends a 1-page alignment and diagnostic sheet directly to any printer.
+  * `GET /api/queue`: Inspects real-time queue states and allows manual job retry.
+
+### 5. Silent Spooling via SumatraPDF CLI
+* Uses an integrated SumatraPDF executable to issue silent print instructions without displaying popup dialogues or dialog windows:
+  ```cmd
+  SumatraPDF.exe -print-to "<PRINTER_NAME>" -print-settings "<PAGES>,<DUPLEX_MODE>,paper=<SIZE>" "<FILE_PATH>"
+  ```
+* Handles page extraction, orientation corrections, and duplex discounts (`duplex: duplexlong` / `duplexshort`).
+
+### 6. Windows Service & Auto-Start Architecture
+To guarantee 24/7 reliability in retail shops without operator intervention, three automated scripts manage the Windows lifecycle:
+* `install-service.bat`: One-click administrative setup. Registers Task Scheduler tasks, creates XML definitions, and enables High-Performance Power Plan.
+* `uninstall-service.bat`: Cleans up and deletes Task Scheduler tasks and restores default balanced power plan.
+* `watchdog.vbs`: Headless, silent VBScript executed every 5 minutes by Task Scheduler. Queries WMI process list for `KluffPrintAgent.exe` and restarts it if closed.
+
+---
+
 ## 🚀 Key Features Implemented
 
 ### 1. 📱 Customer Web App (`client/`)
@@ -62,16 +152,7 @@ flowchart TD
     * **Auto-Return Detection:** Uses `visibilitychange` and `window.focus` event listeners to immediately detect when the user returns to the browser after making payment and automatically dispatches the job.
   * **Step 5: Live Order Tracking (`StepTracking.jsx`):** Real-time progress bar showing queue placement, file spooling, printing progress, and job completion.
 
-### 2. 🖥️ Windows Print Agent (`print-agent/`)
-* **Autonomous Native Windows Execution:** Standalone Node.js executable compiled with `pkg` (`KluffPrintAgent.exe`) that runs silently in the background on the shop counter PC.
-* **Smart Printer Matching:** Automatically interrogates Windows WMI for installed local and network printers. Dispatches B&W jobs to high-speed monochromatic laser printers and color jobs to dedicated color/photo units based on shopkeeper mappings.
-* **Direct Spooling via SumatraPDF / PowerShell:** Silent printing with precise page range, paper size, and duplex orientation arguments.
-* **Self-Healing Watchdog Service:**
-  * `install-service.bat`: One-click administrative installer that registers `AutoPrintAgent` and `AutoPrintWatchdog` via Windows Task Scheduler to start automatically on system boot.
-  * `watchdog.vbs`: Background VBScript monitor checking process liveness every 5 minutes and reviving the agent if terminated.
-  * Sets Windows power management to High Performance to prevent network sleep during idle periods.
-
-### 3. 🛡️ Server & Security (`server/`)
+### 2. 🛡️ Server & Security (`server/`)
 * **Ephemeral QR Sessions:** Short-lived security tokens (`QRSession.js`) that expire after a configurable TTL to prevent stale link usage or off-premise print hijacking.
 * **Instant WebSocket Room Synchronization:** `join-payment-room` and `payment_success` socket channels providing sub-second latency between customer confirmation and physical spool dispatch.
 * **Cleaned Merchant Profile:** Stripped manual UPI ID inputs and payment QR upload cards from `ShopDashboard.jsx` and the backend database model (`Shop.js`) to eliminate configuration friction.
@@ -102,6 +183,7 @@ kluff/
 │   │   └── utils/
 │   │       └── fileStorage.js   # IndexedDB client-side document persistence
 ├── print-agent/                # Windows desktop background print agent
+│   ├── AGENT_ARCHITECTURE.md   # Detailed desktop agent architecture document
 │   ├── KluffPrintAgent.exe     # Compiled standalone background agent binary
 │   ├── config.json             # Shop token & printer hardware mapping
 │   ├── index.js                # Core agent logic, spooler queue & socket client
@@ -146,7 +228,7 @@ kluff/
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/YOUR_USERNAME/kluff.git
+git clone https://github.com/chandan221012-netizen/kluff.git
 cd kluff
 ```
 
@@ -193,6 +275,7 @@ Or launch them in separate terminal windows:
 * **Shop Owner Login:** `http://localhost:5173/login` *(Default test login: `test@shop.com` / `123456`)*
 * **Shop Owner Registration:** `http://localhost:5173/register`
 * **Shop Dashboard:** `http://localhost:5173/dashboard`
+* **Local Print Agent Dashboard:** `http://localhost:5050`
 
 ---
 
@@ -234,6 +317,7 @@ To install the agent permanently as an autonomous Windows background service on 
 
 ## 📝 Changelog & Recent Milestones
 
+* **Print Agent Architecture Integration:** Embedded full system architecture diagrams, persistent queue definitions, and silent spooler specs into [`README.md`](file:///E:/git_repo/kluff/README.md) and [`print-agent/AGENT_ARCHITECTURE.md`](file:///E:/git_repo/kluff/print-agent/AGENT_ARCHITECTURE.md).
 * **Cleaned UPI Architecture:** Eliminated fragile individual app URL schemes (`phonepe://`, `gpay://`, `paytmmp://`) in favor of direct universal intent (`upi://pay`).
 * **Zero QR Customer Interface:** Stripped out on-screen QR codes, standee photo uploads, and scan accordions from `StepPay.jsx`.
 * **Owner Dashboard Simplification:** Completely removed manual UPI ID inputs, photo uploaders, and client-side canvas decoders from `ShopDashboard.jsx`.
