@@ -875,22 +875,37 @@ function startAgentServer(config) {
     res.end('Not Found');
   });
 
-  server.listen(AGENT_UI_PORT, '0.0.0.0', () => {
-    log.info(`════════════════════════════════════════════════════════`);
-    log.info(`   🌐 AGENT OPERATOR UI RUNNING AT:`);
-    log.info(`   👉 http://localhost:${AGENT_UI_PORT}`);
-    log.info(`════════════════════════════════════════════════════════`);
+  let currentPort = Number(AGENT_UI_PORT);
+  const maxPortAttempts = 10;
+  let attempts = 0;
 
-    // Auto-open browser in non-service mode
-    if (!process.argv.includes('--headless') && !process.argv.includes('--service')) {
-      const openCmd = process.platform === 'win32' ? `start http://localhost:${AGENT_UI_PORT}` : `xdg-open http://localhost:${AGENT_UI_PORT}`;
-      exec(openCmd, () => {});
+  function tryListen(port) {
+    server.listen(port, '0.0.0.0', () => {
+      log.info(`════════════════════════════════════════════════════════`);
+      log.info(`   🌐 AGENT OPERATOR UI RUNNING AT:`);
+      log.info(`   👉 http://localhost:${port}`);
+      log.info(`════════════════════════════════════════════════════════`);
+
+      // Auto-open browser in non-service mode
+      if (!process.argv.includes('--headless') && !process.argv.includes('--service')) {
+        const openCmd = process.platform === 'win32' ? `start http://localhost:${port}` : `xdg-open http://localhost:${port}`;
+        exec(openCmd, () => {});
+      }
+    });
+  }
+
+  server.on('error', (e) => {
+    if (e.code === 'EADDRINUSE' && attempts < maxPortAttempts) {
+      attempts++;
+      currentPort++;
+      log.info(`[Agent UI Server] Port in use, trying next available port: ${currentPort}`);
+      setTimeout(() => tryListen(currentPort), 200);
+    } else {
+      log.warn(`[Agent UI Server] Error on port ${currentPort}:`, e.message);
     }
   });
 
-  server.on('error', (e) => {
-    log.warn(`[Agent UI Server] Error on port ${AGENT_UI_PORT}:`, e.message);
-  });
+  tryListen(currentPort);
 
   return {
     setSocket: (s) => { agentSocket = s; }
