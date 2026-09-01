@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { LogIn, Loader2, AlertCircle } from 'lucide-react';
-
-const SERVER_URL = 'http://localhost:5000';
+import { SERVER_URL } from '../config';
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -80,6 +79,18 @@ export default function Login() {
           className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg text-sm flex justify-center items-center gap-2 transition-colors"
         >
           {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><LogIn className="w-4 h-4" /> Log In</>}
+        </button>
+
+        {/* 1-Click Demo Fill */}
+        <button
+          type="button"
+          onClick={() => {
+            setEmail('test@shop.com');
+            setPassword('123456');
+          }}
+          className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg text-xs transition-all text-center"
+        >
+          ⚡ Fill Demo Credentials (test@shop.com / 123456)
         </button>
       </form>
 

@@ -6,12 +6,15 @@ const Shop = require('../models/Shop'); // Ensure Shop model is imported
 const connectedAgents = new Map(); // Maps shopId -> socketId
 
 function initSocket(io) {
-  // Authentication middleware for incoming Print Agent connections
+  // Authentication middleware: Authenticate print agents if token provided, allow customer connections for payment rooms
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+      
+      // If no token, check if client is a customer (browser client)
       if (!token) {
-        return next(new Error('Authentication error: Token missing'));
+        socket.isCustomer = true;
+        return next();
       }
 
       // 1. Development fallback check
@@ -43,7 +46,9 @@ function initSocket(io) {
         socket.shopId = device.shopId;
         return next();
       } catch (jwtErr) {
-        return next(new Error('Authentication failed: Invalid Token or JWT'));
+        // If JWT fails but might be customer, let through as customer
+        socket.isCustomer = true;
+        return next();
       }
     } catch (err) {
       console.error('Socket auth error:', err.message);
@@ -52,33 +57,82 @@ function initSocket(io) {
   });
 
   io.on('connection', async (socket) => {
-    console.log(`Print Agent connected: Device ${socket.deviceId} (Shop: ${socket.shopId})`);
-    connectedAgents.set(socket.shopId, socket.id);
+    if (!socket.isCustomer && socket.deviceId) {
+      console.log(`Print Agent connected: Device ${socket.deviceId} (Shop: ${socket.shopId})`);
+      connectedAgents.set(socket.shopId, socket.id);
 
-    await Device.updateOne(
-      { deviceId: socket.deviceId },
-      { status: 'ONLINE', lastSeenAt: new Date() },
-      { upsert: false }
-    );
+      await Device.updateOne(
+        { deviceId: socket.deviceId },
+        { status: 'ONLINE', lastSeenAt: new Date() },
+        { upsert: false }
+      );
+    }
+
+    // Customer binds to payment room using orderTrId or sessionId
+    socket.on('join-payment-room', ({ orderId, sessionId }) => {
+      const room = orderId || sessionId;
+      if (room) {
+        socket.join(`payment_${room}`);
+        console.log(`[Socket] Customer joined payment room: payment_${room}`);
+      }
+    });
 
     socket.on('join-job-room', (jobId) => {
       socket.join(`job_${jobId}`);
     });
 
-    const pendingJobs = await PrintJob.find({ shopId: socket.shopId, status: 'PENDING' });
-    for (const job of pendingJobs) {
-      socket.emit('print-job', {
-        jobId: job.jobId,
-        printerId: job.printerId,
-        systemPrinterName: job.systemPrinterName || 'Default Printer Name', // Physical printer name e.g. "EPSON L3150 Series"
-        fileUrl: `${process.env.SERVER_URL}/${job.filePath}`,
-        copies: job.copies,
-        pages: job.pagesToPrint,
-        colorMode: job.colorMode
+    socket.on('join-batch-room', (batchId) => {
+      socket.join(`batch_${batchId}`);
+    });
+
+    // ── Helper: dispatch all pending & stale SENT_TO_AGENT jobs to this agent ──
+    async function dispatchPendingJobs() {
+      const STALE_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
+      const staleDate = new Date(Date.now() - STALE_THRESHOLD_MS);
+
+      // Find PENDING jobs + SENT_TO_AGENT jobs older than 2 minutes (never confirmed)
+      const missedJobs = await PrintJob.find({
+        shopId: socket.shopId,
+        $or: [
+          { status: 'PENDING' },
+          { status: 'SENT_TO_AGENT', updatedAt: { $lt: staleDate } }
+        ]
       });
-      job.status = 'SENT_TO_AGENT';
-      await job.save();
+
+      if (missedJobs.length > 0) {
+        console.log(`[Agent Recovery] Dispatching ${missedJobs.length} pending/stale job(s) to ${socket.deviceId}`);
+      }
+
+      for (const job of missedJobs) {
+        socket.emit('print-job', {
+          jobId: job.jobId,
+          batchId: job.batchId,
+          printerId: job.printerId,
+          systemPrinterName: job.systemPrinterName || 'Default Printer Name',
+          filePath: job.filePath,
+          fileUrl: `${process.env.SERVER_URL || 'http://localhost:5000'}/${job.filePath}`,
+          originalFileName: job.originalFileName,
+          fileType: job.fileType,
+          jobType: job.jobType,
+          copies: job.copies,
+          pages: job.pagesToPrint,
+          colorMode: job.colorMode,
+          paperSize: job.paperSize,
+          printSide: job.printSide
+        });
+        job.status = 'SENT_TO_AGENT';
+        await job.save();
+      }
     }
+
+    // Dispatch pending jobs on initial connection
+    await dispatchPendingJobs();
+
+    // ── Agent explicitly requests missed jobs (after reconnect / startup recovery) ──
+    socket.on('agent-request-pending-jobs', async () => {
+      console.log(`[Agent Request] ${socket.deviceId} requested pending jobs`);
+      await dispatchPendingJobs();
+    });
 
     socket.on('job-status-update', async (data) => {
       const { jobId, status, errorMessage } = data;
@@ -89,6 +143,9 @@ function initSocket(io) {
         await job.save();
 
         io.to(`job_${jobId}`).emit('customer-status-update', { jobId, status, errorMessage });
+        if (job.batchId) {
+          io.to(`batch_${job.batchId}`).emit('batch-status-update', { jobId, batchId: job.batchId, status, errorMessage });
+        }
       }
     });
 

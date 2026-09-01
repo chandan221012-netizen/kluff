@@ -1,152 +1,404 @@
-import React, { useState, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import io from 'socket.io-client';
-import {
-  Printer, CheckCircle2, AlertCircle, Loader2,
-  Copy, Palette, Sparkles, ShieldCheck, ArrowRight, ArrowLeft,
-  Store, Clock, FileCheck, CreditCard, ChevronRight, RefreshCw, ZoomIn, RotateCw
-} from 'lucide-react';
+import { Wifi, ArrowLeft, Check, ArrowRight, Clock, QrCode, ShieldAlert, RotateCcw } from 'lucide-react';
+import { SERVER_URL } from '../config';
 
-import UploadZone from '../components/UploadZone';
-import FileCard from '../components/FileCard';
-import PriceBreakdown from '../components/PriceBreakdown';
-import OrderTimeline from '../components/OrderTimeline';
+import ProgressBar from '../components/customer/ProgressBar';
+import StepUpload from '../components/customer/StepUpload';
+import StepEdit from '../components/customer/StepEdit';
+import StepPreview, { parsePageRange } from '../components/customer/StepPreview';
+import StepPay from '../components/customer/StepPay';
+import { saveFilesToStorage, loadFilesFromStorage, clearFilesFromStorage } from '../utils/fileStorage';
 
-const SERVER_URL = 'http://localhost:5000';
+// Module-level cache so mobile OS app switches and remounts NEVER wipe state
+let cachedFiles = [];
+let cachedInitialized = false;
+let cachedShopInfo = null;
+let cachedSessionToken = null;
+let cachedExpiresAt = null;
+let cachedRemainingSeconds = null;
 
 export default function CustomerPrint() {
   const { token } = useParams();
+  const navigate = useNavigate();
+  // Capture the token ONCE at mount time so URL changes never retrigger this
+  const initialTokenRef = useRef(token);
+  const sessionInitializedRef = useRef(cachedInitialized);
 
-  // App Steps: 1: Landing, 2: Upload, 3: Options & Preview, 4: Summary, 5: Payment, 6: Tracking
+  // Steps: 1=Upload, 2=Edit, 3=Preview, 4=Pay, 5=Success/Print Another
   const [currentStep, setCurrentStep] = useState(1);
 
-  // Shop Data
-  const [shopInfo, setShopInfo] = useState(null);
-  const [loadingShop, setLoadingShop] = useState(true);
+  // Shop & Session Data
+  const [shopInfo, setShopInfo] = useState(cachedShopInfo);
+  const [loadingShop, setLoadingShop] = useState(!cachedInitialized);
   const [errorMsg, setErrorMsg] = useState('');
+  const [sessionToken, setSessionToken] = useState(null);
+  const [originalQrToken, setOriginalQrToken] = useState(null);
+  const [expiresAt, setExpiresAt] = useState(null);
+  const [remainingSeconds, setRemainingSeconds] = useState(null);
+  const [isExpired, setIsExpired] = useState(false);
+  const [expiredReason, setExpiredReason] = useState('');
 
-  // Print Job Configuration
-  const [files, setFiles] = useState([]);
-  const [selectedPrinter, setSelectedPrinter] = useState('');
-  const [copies, setCopies] = useState(1);
-  const [colorMode, setColorMode] = useState('bw');
+  // Step 1: Upload
+  const [files, setFilesState] = useState(() => cachedFiles);
+  const setFiles = useCallback((updater) => {
+    setFilesState((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      cachedFiles = Array.isArray(next) ? next : [];
+      return cachedFiles;
+    });
+  }, []);
+
+  // Restore files from IndexedDB if page was killed by Android/iOS background killer
+  useEffect(() => {
+    if (files.length === 0) {
+      loadFilesFromStorage().then((stored) => {
+        if (stored && stored.length > 0) {
+          cachedFiles = stored;
+          setFilesState(stored);
+          try {
+            fetch(`${SERVER_URL}/api/session/log`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                event: 'FILES_RESTORED_FROM_INDEXEDDB',
+                details: { count: stored.length, files: stored.map(f => f.name) }
+              })
+            }).catch(() => {});
+          } catch (e) {}
+        }
+      });
+    }
+  }, []);
+
   const [paperSize, setPaperSize] = useState('A4');
+
+  // Step 2: Edit (per-file settings keyed by file index)
+  const [editSettings, setEditSettings] = useState({});
+
+  // Step 3: Preview
+  const [pageRange, setPageRange] = useState({}); // { fileIndex: "1-3, 5" }
   const [printSide, setPrintSide] = useState('single');
-  const [finishing, setFinishing] = useState('none');
+  const [totalPages, setTotalPages] = useState({}); // set by StepEdit during PDF rendering
+  const [pageImages, setPageImages] = useState({}); // current active/cropped page images
+  const [originalPageImages, setOriginalPageImages] = useState({}); // pristine original images for re-crop / reset
+
+  // Step 4: Pay & Copies per file
+  const [colorMode, setColorMode] = useState('bw');
+  const [fileCopies, setFileCopies] = useState({}); // { [fileIndex]: number }
   const [paymentMethod, setPaymentMethod] = useState('counter');
 
-  // Preview State
-  const [previewFileIndex, setPreviewFileIndex] = useState(0);
-  const [previewZoom, setPreviewZoom] = useState(100);
-  const [previewRotation, setPreviewRotation] = useState(0);
+  const handleSetFileCopies = useCallback((fileIdx, val) => {
+    setFileCopies(prev => ({
+      ...prev,
+      [fileIdx]: Math.max(1, Math.min(50, val))
+    }));
+  }, []);
 
-  // Submission & Tracking
+  // Remove a file and purge its cached preview/edit state
+  const handleRemoveFile = useCallback((indexToRemove) => {
+    setFiles(prevFiles => prevFiles.filter((_, idx) => idx !== indexToRemove));
+    setPageImages(prev => {
+      const copy = { ...prev };
+      delete copy[indexToRemove];
+      return copy;
+    });
+    setOriginalPageImages(prev => {
+      const copy = { ...prev };
+      delete copy[indexToRemove];
+      return copy;
+    });
+    setTotalPages(prev => {
+      const copy = { ...prev };
+      delete copy[indexToRemove];
+      return copy;
+    });
+    setEditSettings(prev => {
+      const copy = { ...prev };
+      delete copy[indexToRemove];
+      return copy;
+    });
+    setFileCopies(prev => {
+      const copy = { ...prev };
+      delete copy[indexToRemove];
+      return copy;
+    });
+    setPageRange(prev => {
+      const copy = { ...prev };
+      delete copy[indexToRemove];
+      return copy;
+    });
+  }, []);
+
+  // Step 5: Order Confirmation
   const [submitting, setSubmitting] = useState(false);
   const [jobId, setJobId] = useState(null);
+  const [batchId, setBatchId] = useState(null);
+  const [batchJobs, setBatchJobs] = useState([]);
   const [status, setStatus] = useState(null);
-  const [pricingBreakdown, setPricingBreakdown] = useState({
-    printing: 0,
-    paper: 0,
-    finishing: 0,
-    service: 2,
-    total: 2,
-  });
 
-  // Fetch Public Shop Info via QR Token
-  useEffect(() => {
-    fetch(`${SERVER_URL}/api/shops/public/${token}`)
-      .then((res) => {
-        if (!res.ok) throw new Error('Invalid or expired QR code');
-        return res.json();
-      })
-      .then((data) => {
-        setShopInfo(data);
-        if (data.printers && data.printers.length > 0) {
-          setSelectedPrinter(data.printers[0].printerId);
+  // Compute total printable pages across all files accounting for per-file copies
+  const totalSelectedPages = useMemo(() => {
+    let count = 0;
+    for (let i = 0; i < files.length; i++) {
+      const range = pageRange?.[i] || '';
+      const tp = totalPages?.[i] || 1;
+      const pagesForFile = (!range.trim()) ? tp : (parsePageRange(range, tp).length || tp);
+      const copiesForFile = fileCopies[i] || 1;
+      count += pagesForFile * copiesForFile;
+    }
+    return count || files.length;
+  }, [files, pageRange, totalPages, fileCopies]);
+
+  // Handler to print another document without scanning QR again
+  const handlePrintAnother = async () => {
+    clearFilesFromStorage().catch(() => {});
+    setFiles([]);
+    setEditSettings({});
+    setPageRange({});
+    setFileCopies({});
+    setPageImages({});
+    setOriginalPageImages({});
+    setTotalPages({});
+    setJobId(null);
+    setBatchId(null);
+    setBatchJobs([]);
+    setStatus(null);
+    setErrorMsg('');
+    setCurrentStep(1);
+
+    // Issue a fresh session token for the next job at counter
+    const activeQr = originalQrToken || initialTokenRef.current;
+    if (activeQr && !activeQr.startsWith('SES_')) {
+      try {
+        const res = await fetch(`${SERVER_URL}/api/session/init`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ qrToken: activeQr })
+        });
+        const data = await res.json();
+        if (data.success) {
+          setSessionToken(data.sessionToken);
+          setExpiresAt(new Date(data.expiresAt).getTime());
+          setRemainingSeconds(data.ttlSeconds);
         }
-        setLoadingShop(false);
-      })
-      .catch((err) => {
+      } catch (e) {}
+    }
+  };
+
+  // Format seconds to mm:ss
+  const formatTime = (secs) => {
+    if (secs == null || isNaN(secs)) return '07:00';
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  // 1. Session Initialization & Validation — runs ONCE on mount only
+  // We use an empty dep array [] and read from initialTokenRef so that
+  // URL changes made later (navigate/replaceState) NEVER re-run this effect
+  // and NEVER wipe files or trigger a re-render of loadingShop.
+  useEffect(() => {
+    if (sessionInitializedRef.current) return;
+
+    const qrToken = initialTokenRef.current;
+
+    const initOrValidate = async () => {
+      try {
+        setLoadingShop(true);
+        setErrorMsg('');
+        setIsExpired(false);
+
+        if (qrToken && qrToken.startsWith('SES_')) {
+          // Existing session token — validate it
+          const res = await fetch(`${SERVER_URL}/api/session/validate/${qrToken}`);
+          const data = await res.json();
+          if (!res.ok || !data.valid) {
+            setIsExpired(true);
+            setExpiredReason(data.message || 'Session expired or inactive. Please scan the QR code at the shop counter to print.');
+            setLoadingShop(false);
+            return;
+          }
+          sessionInitializedRef.current = true;
+          cachedInitialized = true;
+          cachedSessionToken = data.sessionToken;
+          cachedExpiresAt = new Date(data.expiresAt).getTime();
+          cachedRemainingSeconds = data.remainingSeconds;
+          cachedShopInfo = data.shop;
+
+          setSessionToken(data.sessionToken);
+          setExpiresAt(cachedExpiresAt);
+          setRemainingSeconds(data.remainingSeconds);
+          setShopInfo(data.shop);
+          setLoadingShop(false);
+        } else {
+          // Physical QR token — try to issue a fresh 7-minute session token
+          try {
+            const res = await fetch(`${SERVER_URL}/api/session/init`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ qrToken })
+            });
+            const data = await res.json();
+            if (res.ok && data.success) {
+              sessionInitializedRef.current = true;
+              cachedInitialized = true;
+              cachedSessionToken = data.sessionToken;
+              cachedExpiresAt = new Date(data.expiresAt).getTime();
+              cachedRemainingSeconds = data.ttlSeconds;
+              cachedShopInfo = data.shop;
+
+              setSessionToken(data.sessionToken);
+              setOriginalQrToken(qrToken);
+              setExpiresAt(cachedExpiresAt);
+              setRemainingSeconds(data.ttlSeconds);
+              setShopInfo(data.shop);
+              setLoadingShop(false);
+              return;
+            }
+          } catch (sessionErr) {
+            console.warn('Session init failed, falling back to direct shop check:', sessionErr);
+          }
+
+          // Fallback to standard shop check
+          const fallbackRes = await fetch(`${SERVER_URL}/api/shops/${qrToken}`);
+          const fallbackData = await fallbackRes.json();
+          if (!fallbackRes.ok || (!fallbackData.shopName && !fallbackData.name)) {
+            throw new Error('Shop not found or inactive. Please scan the counter QR code.');
+          }
+
+          sessionInitializedRef.current = true;
+          cachedInitialized = true;
+          cachedShopInfo = fallbackData;
+          setSessionToken(null);
+          setOriginalQrToken(qrToken);
+          setShopInfo(fallbackData);
+          setLoadingShop(false);
+        }
+      } catch (err) {
         setErrorMsg(err.message);
         setLoadingShop(false);
-      });
-  }, [token]);
+      }
+    };
 
-  // Recalculate Dynamic Pricing whenever print settings change
+    initOrValidate();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // INTENTIONALLY empty — must only run once on mount
+
+  // 2. Real-Time 7-Minute Countdown Ticker
   useEffect(() => {
-    if (!shopInfo) return;
+    if (!expiresAt || isExpired) return;
 
-    const rate = colorMode === 'color'
-      ? (shopInfo.pricing?.colorPerPage || 10)
-      : (shopInfo.pricing?.bwPerPage || 2);
+    const interval = setInterval(() => {
+      const diff = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+      setRemainingSeconds(diff);
+      // Never forcefully kick user out if they have files uploaded or are actively using the page
+      if (diff <= 0 && (!cachedFiles || cachedFiles.length === 0)) {
+        setIsExpired(true);
+        setExpiredReason('Session expired or inactive. Please scan the QR code at the shop counter to print.');
+        clearInterval(interval);
+      }
+    }, 1000);
 
-    // Default estimate assuming 1 page per file if page-parsing isn't finished
-    const estimatedTotalPages = files.reduce((acc, f) => acc + (f.pageCount || 1), 0);
-    const printingCost = estimatedTotalPages * rate * copies;
-    const paperCost = paperSize === 'A3' ? estimatedTotalPages * 2 * copies : 0;
-    const finishingCost = finishing === 'staple' ? 5 : finishing === 'binding' ? 30 : 0;
-    const serviceFee = 2;
+    return () => clearInterval(interval);
+  }, [expiresAt, isExpired]);
 
-    setPricingBreakdown({
-      printing: printingCost,
-      paper: paperCost,
-      finishing: finishingCost,
-      service: serviceFee,
-      total: printingCost + paperCost + finishingCost + serviceFee,
+  // 3. 7-Minute Inactivity Watchdog
+  useEffect(() => {
+    if (isExpired) return;
+    let inactivityTimer;
+
+    const resetInactivity = () => {
+      clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => {
+        // Never expire if files are selected
+        if (!cachedFiles || cachedFiles.length === 0) {
+          setIsExpired(true);
+          setExpiredReason('Session expired or inactive. Please scan the QR code at the shop counter to print.');
+        }
+      }, 7 * 60 * 1000);
+    };
+
+    resetInactivity();
+    const events = ['mousedown', 'mousemove', 'touchstart', 'scroll', 'keydown'];
+    events.forEach(ev => window.addEventListener(ev, resetInactivity, { passive: true }));
+
+    return () => {
+      clearTimeout(inactivityTimer);
+      events.forEach(ev => window.removeEventListener(ev, resetInactivity));
+    };
+  }, [isExpired]);
+
+  // Socket connection for tracking
+  useEffect(() => {
+    if (!batchId) return;
+    const socket = io(SERVER_URL);
+    socket.emit('join-batch-room', { batchId });
+
+    socket.on('batch-status-update', (update) => {
+      setBatchJobs(prev =>
+        prev.map(j => j.jobId === update.jobId ? { ...j, status: update.status } : j)
+      );
+      if (update.status === 'COMPLETED' || update.status === 'FAILED') {
+        setStatus(update.status);
+      }
     });
-  }, [files, copies, colorMode, paperSize, finishing, shopInfo]);
 
-  // File Handlers
-  const handleFilesAdded = (newFiles) => {
-    const formattedFiles = newFiles.map((file) => Object.assign(file, { pageCount: 1 }));
-    setFiles((prev) => [...prev, ...formattedFiles]);
-  };
+    socket.on('customer-status-update', (update) => {
+      setStatus(update.status);
+    });
 
-  const handleRemoveFile = (index) => {
-    setFiles((prev) => prev.filter((_, i) => i !== index));
-  };
+    return () => socket.disconnect();
+  }, [batchId]);
 
-  // Submit Order to Backend
-  const handleSubmitJob = async () => {
-    if (files.length === 0 || !selectedPrinter) return;
-
+  // Submit print job
+  const handleSubmit = async () => {
     setSubmitting(true);
-    setErrorMsg('');
-
-    const formData = new FormData();
-    files.forEach((file) => formData.append('document', file));
-    formData.append('shopToken', token);
-    formData.append('printerId', selectedPrinter);
-    formData.append('copies', copies);
-    formData.append('colorMode', colorMode);
-    formData.append('paperSize', paperSize);
-    formData.append('printSide', printSide);
-    formData.append('finishing', finishing);
-    formData.append('paymentMethod', paymentMethod);
-
     try {
-      const res = await fetch(`${SERVER_URL}/api/print-jobs/submit`, {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await res.json();
+      const formData = new FormData();
+      files.forEach((file) => formData.append('files', file));
+      formData.append('shopToken', originalQrToken || token);
+      if (sessionToken) {
+        formData.append('sessionToken', sessionToken);
+      }
+      formData.append('colorMode', colorMode);
+      formData.append('copies', 1);
+      formData.append('fileCopies', JSON.stringify(fileCopies));
+      formData.append('paperSize', paperSize);
+      formData.append('printSide', printSide);
+      formData.append('paymentMethod', paymentMethod);
 
-      if (!res.ok || !data.success) {
+      // Send page ranges
+      const ranges = {};
+      for (let i = 0; i < files.length; i++) {
+        if (pageRange[i]) ranges[i] = pageRange[i];
+      }
+      formData.append('pageRanges', JSON.stringify(ranges));
+
+      // Send edit settings
+      formData.append('editSettings', JSON.stringify(editSettings));
+
+      const res = await fetch(`${SERVER_URL}/api/print`, {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        if (res.status === 403 && (data.error === 'SESSION_EXPIRED' || data.error?.includes('Session'))) {
+          setIsExpired(true);
+          setExpiredReason(data.message || 'Session expired or inactive. Please scan the QR code at the shop counter to print.');
+          return;
+        }
         throw new Error(data.error || 'Failed to submit print job');
       }
 
-      setJobId(data.jobId);
-      setStatus(data.status || 'RECEIVED');
-      setCurrentStep(6); // Move to Order Tracking
-
-      // Connect Socket.IO for live order progress
-      const socket = io(SERVER_URL);
-      socket.emit('join-job-room', data.jobId);
-
-      socket.on('customer-status-update', (update) => {
-        setStatus(update.status);
-        if (update.errorMessage) setErrorMsg(update.errorMessage);
-      });
+      setJobId(data.jobId || data.jobs?.[0]?.jobId);
+      setBatchId(data.batchId);
+      setBatchJobs(data.jobs || [{ jobId: data.jobId, status: 'RECEIVED', originalFileName: files[0]?.name }]);
+      setStatus('RECEIVED');
+      setCurrentStep(5);
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -154,449 +406,308 @@ export default function CustomerPrint() {
     }
   };
 
+  // Initialize default edit settings for new files and purge stale state on clear
+  useEffect(() => {
+    if (files.length === 0) {
+      setPageImages({});
+      setOriginalPageImages({});
+      setTotalPages({});
+      setEditSettings({});
+      setFileCopies({});
+      setPageRange({});
+      return;
+    }
+    const newSettings = { ...editSettings };
+    files.forEach((_, i) => {
+      if (!newSettings[i]) {
+        newSettings[i] = {
+          zoom: 1,
+          rotation: 0,
+          brightness: 100,
+          contrast: 100,
+          orientation: 'portrait',
+          crop: null
+        };
+      }
+    });
+    setEditSettings(newSettings);
+  }, [files.length]);
+
+  // Loading state
   if (loadingShop) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[80vh]">
-        <div className="p-4 bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-100 flex items-center gap-3">
-          <Loader2 className="w-6 h-6 text-indigo-600 animate-spin" />
-          <span className="text-sm font-medium text-slate-600">Connecting to print terminal...</span>
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <div className="w-10 h-10 border-3 border-slate-900 border-t-transparent rounded-full animate-spin mx-auto" />
+          <p className="text-xs font-medium text-slate-400">Loading shop...</p>
         </div>
       </div>
     );
   }
 
+  // 7-Minute QR Session Expired Screen (Blocks bookmarks, old links & inactivity)
+  if (isExpired) {
+    return (
+      <div className="min-h-screen py-10 px-4 flex items-center justify-center">
+        <div className="bg-white rounded-3xl shadow-xl border border-slate-100 p-8 max-w-sm w-full text-center space-y-6 animate-in fade-in zoom-in-95 duration-200">
+          <div className="w-20 h-20 bg-amber-50 border-2 border-amber-100 text-amber-600 rounded-3xl flex items-center justify-center mx-auto shadow-sm">
+            <QrCode className="w-10 h-10 stroke-[2]" />
+          </div>
+
+          <div className="space-y-2">
+            <h2 className="text-xl font-black text-slate-900 tracking-tight">Session Expired</h2>
+            <p className="text-sm font-semibold text-slate-700 leading-relaxed">
+              Session expired or inactive. Please scan the QR code at the shop counter to print.
+            </p>
+          </div>
+
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (originalQrToken && !originalQrToken.startsWith('SES_')) {
+                  window.location.href = `/print/${originalQrToken}`;
+                } else {
+                  window.location.href = '/test';
+                }
+              }}
+              className="w-full bg-slate-900 hover:bg-black active:scale-[0.98] text-white font-bold py-3.5 rounded-2xl text-xs uppercase tracking-wider transition-all shadow-md flex items-center justify-center gap-2"
+            >
+              <RotateCcw className="w-4 h-4" />
+              <span>Scan Again at Counter</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Error state
   if (errorMsg && !shopInfo) {
     return (
-      <div className="max-w-md mx-auto mt-16 p-8 bg-white rounded-3xl shadow-xl shadow-slate-200/50 border border-slate-100 text-center">
-        <div className="w-14 h-14 bg-red-50 text-red-500 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-red-100">
-          <AlertCircle className="w-7 h-7" />
+      <div className="min-h-screen flex items-center justify-center p-6">
+        <div className="bg-white rounded-3xl shadow-xl border border-slate-100 p-8 text-center max-w-sm w-full space-y-4 animate-in fade-in zoom-in-95 duration-200">
+          <div className="w-16 h-16 bg-red-50 text-red-500 rounded-3xl flex items-center justify-center mx-auto text-2xl font-bold border-2 border-red-100">
+            !
+          </div>
+          <div className="space-y-1">
+            <h2 className="text-lg font-bold text-slate-900">Shop Not Found or Inactive</h2>
+            <p className="text-xs text-slate-500 leading-relaxed">
+              {errorMsg.includes('fetch') 
+                ? 'Unable to connect to printing server. Please check your connection.'
+                : 'Session expired or invalid QR code. Please scan the QR code at the shop counter.'}
+            </p>
+          </div>
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                window.location.href = '/test';
+              }}
+              className="w-full bg-slate-900 hover:bg-black active:scale-[0.98] text-white font-bold py-3.5 rounded-2xl text-xs uppercase tracking-wider transition-all shadow-md flex items-center justify-center gap-2"
+            >
+              <RotateCcw className="w-4 h-4" />
+              <span>Scan Again / Try Test Shop</span>
+            </button>
+          </div>
         </div>
-        <h2 className="text-xl font-bold text-slate-900">Terminal Offline</h2>
-        <p className="text-sm text-slate-500 mt-2 leading-relaxed">{errorMsg}</p>
       </div>
     );
   }
 
   return (
-    <div className="max-w-md mx-auto my-4 px-4 pb-12">
-      {/* Brand Header */}
-      <div className="flex items-center justify-between py-3 mb-4 border-b border-slate-100">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-black text-sm shadow-md shadow-indigo-600/20">
-            K
-          </div>
-          <div>
-            <span className="text-base font-black text-slate-900 tracking-tight">Kluff</span>
-            <span className="text-[10px] text-slate-400 font-semibold block leading-none">Zero-Touch Printing</span>
-          </div>
-        </div>
+    <div className="min-h-screen py-2">
+      <div className="max-w-md mx-auto px-4 py-3 space-y-5">
 
-        {currentStep < 6 && (
-          <span className="text-[11px] font-bold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">
-            Step {currentStep} of 5
-          </span>
-        )}
+          {/* Brand Header */}
+          <header className="relative pt-3 pb-2 text-center">
+            {currentStep > 1 && currentStep <= 4 && (
+              <button
+                type="button"
+                onClick={() => setCurrentStep(s => s - 1)}
+                className="absolute left-0 top-3 w-10 h-10 rounded-2xl bg-white border border-slate-200/90 shadow-xs flex items-center justify-center text-slate-800 hover:bg-slate-50 transition-all active:scale-[0.95] z-10"
+                title="Go Back"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+            )}
+
+            <div className="flex flex-col items-center justify-center">
+              {/* Logo & Brand Name matching reference image */}
+              <div className="inline-flex items-center gap-2">
+                <div className="flex items-baseline font-black tracking-tighter select-none mr-1">
+                  <span className="text-amber-500 font-black text-4xl sm:text-5xl leading-none -mr-1">A</span>
+                  <span className="text-slate-900 font-black text-3xl sm:text-4xl leading-none">P</span>
+                </div>
+                <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight select-none">
+                  <span className="text-slate-900">Auto</span>
+                  <span className="text-amber-500">Print</span>
+                </h1>
+                {/* Rapidly Blinking Live Dot */}
+                <span className="relative flex h-3.5 w-3.5 ml-1">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-90" style={{ animationDuration: '0.7s' }} />
+                  <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500 shadow-sm shadow-emerald-500/60" />
+                </span>
+              </div>
+
+              {/* Tagline matching reference image */}
+              <div className="mt-0.5 text-center">
+                <p className="text-xl sm:text-2xl font-bold text-slate-800 tracking-wide font-['Caveat',cursive]">
+                  Print Karo, <span className="relative inline-block">
+                    Apne Style Mein
+                    <span className="absolute -bottom-0.5 left-0 w-full h-[3px] bg-amber-400 rounded-full" />
+                  </span>
+                </p>
+              </div>
+
+              {shopInfo?.name && (
+                <div className="inline-flex items-center gap-1.5 text-[11px] text-amber-900 font-bold bg-gradient-to-r from-amber-100/90 to-amber-50 border border-amber-300/80 px-3.5 py-1 rounded-full mt-2 shadow-xs">
+                  <span>📍</span>
+                  <span>{shopInfo.name}</span>
+                </div>
+              )}
+            </div>
+          </header>
+
+          {/* Progress Bar (only for steps 1-4) */}
+          {currentStep <= 4 && (
+            <ProgressBar currentStep={currentStep} />
+          )}
+
+          {/* Error Banner */}
+          {errorMsg && currentStep <= 4 && (
+            <div className="bg-red-50 border border-red-100 text-red-600 text-xs font-medium p-3 rounded-xl">
+              ⚠️ {errorMsg}
+            </div>
+          )}
+
+          {/* Step Content */}
+          {currentStep === 1 && (
+            <StepUpload
+              files={files}
+              setFiles={setFiles}
+              onRemoveFile={handleRemoveFile}
+              paperSize={paperSize}
+              setPaperSize={setPaperSize}
+              onNext={() => setCurrentStep(2)}
+            />
+          )}
+
+          {currentStep === 2 && (
+            <StepEdit
+              files={files}
+              setFiles={setFiles}
+              editSettings={editSettings}
+              setEditSettings={setEditSettings}
+              pageImages={pageImages}
+              setPageImages={setPageImages}
+              originalPageImages={originalPageImages}
+              setOriginalPageImages={setOriginalPageImages}
+              totalPages={totalPages}
+              setTotalPages={setTotalPages}
+              paperSize={paperSize}
+              setPaperSize={setPaperSize}
+              onPageData={({ totalPages: tp, pageImages: pi, originalPageImages: opi }) => {
+                if (tp) setTotalPages(tp);
+                if (pi) setPageImages(pi);
+                if (opi) setOriginalPageImages(opi);
+              }}
+              onNext={() => setCurrentStep(3)}
+              onBack={() => setCurrentStep(1)}
+            />
+          )}
+
+          {currentStep === 3 && (
+            <StepPreview
+              files={files}
+              editSettings={editSettings}
+              pageRange={pageRange}
+              setPageRange={setPageRange}
+              fileCopies={fileCopies}
+              setFileCopies={handleSetFileCopies}
+              printSide={printSide}
+              setPrintSide={setPrintSide}
+              totalPages={totalPages}
+              pageImages={pageImages}
+              onNext={() => setCurrentStep(4)}
+              onBack={() => setCurrentStep(2)}
+            />
+          )}
+
+          {currentStep === 4 && (
+            <StepPay
+              files={files}
+              totalSelectedPages={totalSelectedPages}
+              colorMode={colorMode}
+              setColorMode={setColorMode}
+              fileCopies={fileCopies}
+              setFileCopies={handleSetFileCopies}
+              printSide={printSide}
+              paperSize={paperSize}
+              paymentMethod={paymentMethod}
+              setPaymentMethod={setPaymentMethod}
+              shopInfo={shopInfo}
+              sessionToken={sessionToken}
+              onSubmit={handleSubmit}
+              onBack={() => setCurrentStep(3)}
+              submitting={submitting}
+            />
+          )}
+
+          {currentStep === 5 && (
+            <div className="bg-white rounded-3xl shadow-sm border border-slate-100 p-6 text-center space-y-5 max-w-[440px] mx-auto">
+              <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto shadow-xs">
+                <Check className="w-8 h-8 stroke-[3]" />
+              </div>
+
+              <div className="space-y-1">
+                <h2 className="text-xl font-black text-slate-900 tracking-tight">Print Order Sent!</h2>
+                <p className="text-xs text-slate-400">Your documents are now being processed by the printer.</p>
+              </div>
+
+              <div className="bg-slate-50/80 rounded-2xl p-4 border border-slate-100 text-left space-y-2 text-xs">
+                <div className="flex justify-between text-slate-600">
+                  <span>Job Reference</span>
+                  <span className="font-mono font-bold text-slate-900">{jobId || batchId || 'Confirmed'}</span>
+                </div>
+                <div className="flex justify-between text-slate-600">
+                  <span>Total Prints</span>
+                  <span className="font-bold text-slate-900">{totalSelectedPages} pages</span>
+                </div>
+                <div className="flex justify-between text-slate-600">
+                  <span>Color Mode</span>
+                  <span className="font-bold text-slate-900">{colorMode === 'color' ? 'Color' : 'Black & White'}</span>
+                </div>
+                <div className="flex justify-between text-slate-600">
+                  <span>Payment Status</span>
+                  <span className="font-bold text-emerald-700 capitalize">{paymentMethod === 'counter' ? 'Pay on Counter' : 'UPI Paid'}</span>
+                </div>
+              </div>
+
+              {/* Print Another Document Button */}
+              <button
+                type="button"
+                onClick={handlePrintAnother}
+                className="w-full bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white font-bold py-4 rounded-2xl text-sm shadow-lg shadow-emerald-600/25 transition-all flex items-center justify-center gap-2"
+              >
+                <span>Print Another Document</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
+
+              <p className="text-[11px] text-slate-400">
+                You can print more files directly without scanning the QR code again.
+              </p>
+            </div>
+          )}
+
+          {/* Global Footer */}
+          <footer className="text-center pt-6 pb-4 space-y-1">
+            <p className="text-xs text-slate-500 font-medium">
+              ⚡ Powered by <span className="font-bold text-emerald-600">AutoPrint</span>
+            </p>
+            <p className="text-[10px] text-slate-400">© 2025 AutoPrint. All Rights Reserved.</p>
+          </footer>
+        </div>
       </div>
-
-      {/* ========================================================================= */}
-      {/* STEP 1: SHOP LANDING PAGE                                                 */}
-      {/* ========================================================================= */}
-      {currentStep === 1 && (
-        <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-xl shadow-slate-200/50 space-y-6">
-          <div className="text-center space-y-2">
-            <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto border border-indigo-100 shadow-sm">
-              <Store className="w-8 h-8" />
-            </div>
-            <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full inline-block">
-              Connected Terminal
-            </span>
-            <h1 className="text-2xl font-black text-slate-900">{shopInfo?.shopName}</h1>
-            <p className="text-xs text-slate-400 flex items-center justify-center gap-1 font-medium">
-              <Clock className="w-3.5 h-3.5 text-emerald-500" /> Est. Ready Time: 5-10 mins
-            </p>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3 text-center text-xs pt-2">
-            <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100">
-              <span className="text-[10px] text-slate-400 uppercase font-bold block">B&W Rate</span>
-              <span className="text-sm font-black text-slate-800">₹{shopInfo?.pricing?.bwPerPage}/pg</span>
-            </div>
-            <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100">
-              <span className="text-[10px] text-slate-400 uppercase font-bold block">Color Rate</span>
-              <span className="text-sm font-black text-slate-800">₹{shopInfo?.pricing?.colorPerPage}/pg</span>
-            </div>
-          </div>
-
-          <div className="space-y-2 pt-2 border-t border-slate-100 text-xs text-slate-500">
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-              <span>No app installation required</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-              <span>Direct encrypted spooling to shop printer</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-              <span>Instant price estimation & progress tracking</span>
-            </div>
-          </div>
-
-          <button
-            onClick={() => setCurrentStep(2)}
-            className="w-full bg-indigo-600 hover:bg-indigo-700 active:scale-[0.99] text-white font-bold py-3.5 rounded-2xl shadow-lg shadow-indigo-600/25 transition-all flex items-center justify-center gap-2 text-xs uppercase tracking-wider"
-          >
-            Start Printing <ArrowRight className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* STEP 2: UPLOAD DOCUMENT                                                   */}
-      {/* ========================================================================= */}
-      {currentStep === 2 && (
-        <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-xl shadow-slate-200/50 space-y-5">
-          <div>
-            <h2 className="text-lg font-bold text-slate-900">What would you like to print?</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Upload PDFs, images, or document files</p>
-          </div>
-
-          <UploadZone onFilesSelected={handleFilesAdded} />
-
-          {files.length > 0 && (
-            <div className="space-y-2 pt-2">
-              <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                Uploaded Files ({files.length})
-              </label>
-              {files.map((file, index) => (
-                <FileCard
-                  key={index}
-                  file={file}
-                  pageCount={file.pageCount}
-                  onRemove={() => handleRemoveFile(index)}
-                  onPreview={() => {
-                    setPreviewFileIndex(index);
-                    setCurrentStep(3);
-                  }}
-                />
-              ))}
-            </div>
-          )}
-
-          <div className="flex gap-3 pt-4">
-            <button
-              onClick={() => setCurrentStep(1)}
-              className="px-4 py-3 bg-slate-100 text-slate-600 rounded-xl text-xs font-bold"
-            >
-              Back
-            </button>
-            <button
-              disabled={files.length === 0}
-              onClick={() => setCurrentStep(3)}
-              className="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold py-3 rounded-xl text-xs uppercase tracking-wider flex items-center justify-center gap-2"
-            >
-              Continue <ArrowRight className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* STEP 3: FILE PREVIEW & PRINT OPTIONS                                      */}
-      {/* ========================================================================= */}
-      {currentStep === 3 && (
-        <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-xl shadow-slate-200/50 space-y-6">
-          <div>
-            <h2 className="text-lg font-bold text-slate-900">Configure Print Options</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Preview and adjust formatting rules</p>
-          </div>
-
-          {/* Minimal Document Preview Controls */}
-          {files[previewFileIndex] && (
-            <div className="bg-slate-900 text-white p-4 rounded-2xl space-y-3">
-              <div className="flex justify-between items-center text-xs">
-                <span className="font-medium truncate max-w-[180px]">{files[previewFileIndex].name}</span>
-                <div className="flex items-center gap-2">
-                  <button onClick={() => setPreviewZoom((z) => Math.min(z + 25, 200))} className="p-1 hover:text-indigo-400">
-                    <ZoomIn className="w-3.5 h-3.5" />
-                  </button>
-                  <button onClick={() => setPreviewRotation((r) => (r + 90) % 360)} className="p-1 hover:text-indigo-400">
-                    <RotateCw className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-              <div className="h-32 bg-slate-800 rounded-xl flex items-center justify-center border border-slate-700 overflow-hidden">
-                <div
-                  style={{
-                    transform: `scale(${previewZoom / 100}) rotate(${previewRotation}deg)`,
-                    transition: 'transform 0.2s ease',
-                  }}
-                  className="text-slate-400 text-xs flex flex-col items-center gap-1"
-                >
-                  <FileCheck className="w-8 h-8 text-indigo-400" />
-                  <span>Page 1 of {files[previewFileIndex].pageCount || 1}</span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Configuration Form */}
-          <div className="space-y-4 text-xs">
-            {/* Target Printer */}
-            <div>
-              <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">Target Printer</label>
-              <select
-                value={selectedPrinter}
-                onChange={(e) => setSelectedPrinter(e.target.value)}
-                className="w-full font-medium border border-slate-200 rounded-xl p-2.5 bg-slate-50 text-slate-800"
-              >
-                {shopInfo?.printers?.map((p) => (
-                  <option key={p.printerId} value={p.printerId}>
-                    {p.name} {p.isColorSupported ? '• (Color)' : '• (Monochrome)'}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Copies & Color Mode */}
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">Copies</label>
-                <input
-                  type="number"
-                  min="1"
-                  max="50"
-                  value={copies}
-                  onChange={(e) => setCopies(Number(e.target.value))}
-                  className="w-full font-medium border border-slate-200 rounded-xl p-2.5 bg-slate-50 text-slate-800"
-                />
-              </div>
-              <div>
-                <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">Color Mode</label>
-                <select
-                  value={colorMode}
-                  onChange={(e) => setColorMode(e.target.value)}
-                  className="w-full font-medium border border-slate-200 rounded-xl p-2.5 bg-slate-50 text-slate-800"
-                >
-                  <option value="bw">B&W (₹{shopInfo?.pricing?.bwPerPage}/pg)</option>
-                  <option value="color">Color (₹{shopInfo?.pricing?.colorPerPage}/pg)</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Paper Size & Sides */}
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">Paper Size</label>
-                <select
-                  value={paperSize}
-                  onChange={(e) => setPaperSize(e.target.value)}
-                  className="w-full font-medium border border-slate-200 rounded-xl p-2.5 bg-slate-50 text-slate-800"
-                >
-                  <option value="A4">A4 Standard</option>
-                  <option value="A3">A3 Poster (+₹2)</option>
-                  <option value="Letter">Letter</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">Print Sides</label>
-                <select
-                  value={printSide}
-                  onChange={(e) => setPrintSide(e.target.value)}
-                  className="w-full font-medium border border-slate-200 rounded-xl p-2.5 bg-slate-50 text-slate-800"
-                >
-                  <option value="single">Single-Sided</option>
-                  <option value="double">Double-Sided (Duplex)</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Finishing */}
-            <div>
-              <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">Finishing Options</label>
-              <select
-                value={finishing}
-                onChange={(e) => setFinishing(e.target.value)}
-                className="w-full font-medium border border-slate-200 rounded-xl p-2.5 bg-slate-50 text-slate-800"
-              >
-                <option value="none">No Finishing</option>
-                <option value="staple">Corner Staple (+₹5)</option>
-                <option value="binding">Spiral Binding (+₹30)</option>
-              </select>
-            </div>
-          </div>
-
-          <PriceBreakdown {...pricingBreakdown} />
-
-          <div className="flex gap-3 pt-2">
-            <button
-              onClick={() => setCurrentStep(2)}
-              className="px-4 py-3 bg-slate-100 text-slate-600 rounded-xl text-xs font-bold"
-            >
-              Back
-            </button>
-            <button
-              onClick={() => setCurrentStep(4)}
-              className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl text-xs uppercase tracking-wider flex items-center justify-center gap-2"
-            >
-              Review Order <ArrowRight className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* STEP 4: ORDER SUMMARY                                                     */}
-      {/* ========================================================================= */}
-      {currentStep === 4 && (
-        <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-xl shadow-slate-200/50 space-y-5">
-          <div>
-            <h2 className="text-lg font-bold text-slate-900">Order Summary</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Please review before sending to queue</p>
-          </div>
-
-          <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-3 text-xs">
-            <div className="flex justify-between font-medium">
-              <span className="text-slate-500">Shop</span>
-              <span className="font-bold text-slate-800">{shopInfo?.shopName}</span>
-            </div>
-            <div className="flex justify-between font-medium">
-              <span className="text-slate-500">Documents</span>
-              <span className="font-bold text-slate-800">{files.length} file(s)</span>
-            </div>
-            <div className="flex justify-between font-medium">
-              <span className="text-slate-500">Settings</span>
-              <span className="font-bold text-slate-800">
-                {paperSize} • {colorMode.toUpperCase()} • {copies} Copy(ies)
-              </span>
-            </div>
-            <div className="flex justify-between font-medium">
-              <span className="text-slate-500">Finishing</span>
-              <span className="font-bold text-slate-800">{finishing}</span>
-            </div>
-          </div>
-
-          <PriceBreakdown {...pricingBreakdown} />
-
-          <div className="flex gap-3 pt-2">
-            <button
-              onClick={() => setCurrentStep(3)}
-              className="px-4 py-3 bg-slate-100 text-slate-600 rounded-xl text-xs font-bold"
-            >
-              Edit Settings
-            </button>
-            <button
-              onClick={() => setCurrentStep(5)}
-              className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl text-xs uppercase tracking-wider flex items-center justify-center gap-2"
-            >
-              Proceed to Payment <ArrowRight className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* STEP 5: PAYMENT                                                           */}
-      {/* ========================================================================= */}
-      {currentStep === 5 && (
-        <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-xl shadow-slate-200/50 space-y-5">
-          <div>
-            <h2 className="text-lg font-bold text-slate-900">Choose Payment Method</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Total payable: ₹{pricingBreakdown.total}</p>
-          </div>
-
-          <div className="space-y-3 text-xs">
-            <label
-              onClick={() => setPaymentMethod('counter')}
-              className={`flex items-center justify-between p-4 rounded-2xl border-2 cursor-pointer transition-all ${paymentMethod === 'counter'
-                  ? 'border-indigo-600 bg-indigo-50/40 text-indigo-900 font-bold'
-                  : 'border-slate-100 text-slate-600'
-                }`}
-            >
-              <div className="flex items-center gap-3">
-                <Store className="w-5 h-5 text-indigo-600" />
-                <div>
-                  <p className="font-bold text-slate-800">Pay at Counter</p>
-                  <p className="text-[10px] text-slate-400 font-normal">Pay cash or UPI directly when picking up</p>
-                </div>
-              </div>
-              <input type="radio" checked={paymentMethod === 'counter'} readOnly />
-            </label>
-
-            <label
-              onClick={() => setPaymentMethod('upi')}
-              className={`flex items-center justify-between p-4 rounded-2xl border-2 cursor-pointer transition-all ${paymentMethod === 'upi'
-                  ? 'border-indigo-600 bg-indigo-50/40 text-indigo-900 font-bold'
-                  : 'border-slate-100 text-slate-600'
-                }`}
-            >
-              <div className="flex items-center gap-3">
-                <CreditCard className="w-5 h-5 text-indigo-600" />
-                <div>
-                  <p className="font-bold text-slate-800">Instant UPI QR</p>
-                  <p className="text-[10px] text-slate-400 font-normal">Pay online before printing starts</p>
-                </div>
-              </div>
-              <input type="radio" checked={paymentMethod === 'upi'} readOnly />
-            </label>
-          </div>
-
-          {errorMsg && <p className="text-xs text-rose-500 font-medium">{errorMsg}</p>}
-
-          <div className="flex gap-3 pt-2">
-            <button
-              onClick={() => setCurrentStep(4)}
-              className="px-4 py-3 bg-slate-100 text-slate-600 rounded-xl text-xs font-bold"
-            >
-              Back
-            </button>
-            <button
-              disabled={submitting}
-              onClick={handleSubmitJob}
-              className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/25"
-            >
-              {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Confirm & Print'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* STEP 6: REAL-TIME ORDER TRACKING                                          */}
-      {/* ========================================================================= */}
-      {currentStep === 6 && (
-        <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-xl shadow-slate-200/50 text-center space-y-6">
-          <div className="inline-flex items-center gap-2 px-3.5 py-1.5 bg-indigo-50 text-indigo-700 rounded-full text-xs font-semibold tracking-wide">
-            <Sparkles className="w-3.5 h-3.5" /> Order Confirmed
-          </div>
-
-          <div>
-            <h2 className="text-2xl font-black text-slate-900">{shopInfo?.shopName}</h2>
-            <p className="text-xs font-mono text-slate-400 mt-1 uppercase tracking-wider">
-              Ref ID: #{jobId?.substring(0, 8)}
-            </p>
-          </div>
-
-          <OrderTimeline currentStatus={status || 'RECEIVED'} />
-
-          <div className="flex items-center justify-between p-4 bg-slate-900 text-white rounded-2xl shadow-lg shadow-slate-900/10">
-            <span className="text-xs font-medium text-slate-300">Total Payable</span>
-            <span className="text-xl font-black">₹{pricingBreakdown.total}</span>
-          </div>
-
-          <button
-            onClick={() => {
-              setFiles([]);
-              setJobId(null);
-              setStatus(null);
-              setCurrentStep(1);
-            }}
-            className="text-xs font-bold text-indigo-600 hover:text-indigo-700 transition-colors inline-block"
-          >
-            Print Another Document
-          </button>
-        </div>
-      )}
-    </div>
   );
 }

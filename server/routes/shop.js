@@ -3,7 +3,7 @@ const router = express.Router();
 const Shop = require('../models/Shop');
 const Printer = require('../models/Printer');
 
-router.get('/public/:token', async (req, res) => {
+const getShopHandler = async (req, res) => {
   try {
     const shop = await Shop.findOne({ qrToken: req.params.token, isActive: true });
     if (!shop) {
@@ -14,6 +14,7 @@ router.get('/public/:token', async (req, res) => {
 
     res.json({
       shopName: shop.name,
+      name: shop.name,
       pricing: shop.pricing,
       printers: printers.map(p => ({
         printerId: p.printerId,
@@ -24,6 +25,9 @@ router.get('/public/:token', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+};
+
+router.get('/public/:token', getShopHandler);
+router.get('/:token', getShopHandler);
 
 module.exports = router;

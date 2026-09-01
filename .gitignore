@@ -1,0 +1,29 @@
+# Node modules
+node_modules/
+*/node_modules/
+
+# Environment files
+.env
+.env.local
+*.env
+
+# Build outputs
+dist/
+build/
+*/dist/
+
+# Logs
+*.log
+print-agent/agent.log
+print-agent/watchdog.log
+
+# Uploads & Temporary files
+server/uploads/*
+!server/uploads/.gitkeep
+print-agent/job-queue.json
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

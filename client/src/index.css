@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
 body {
-  @apply bg-slate-50 text-slate-900 antialiased min-h-screen;
+  background-color: #fcfcf9;
+  background-image: radial-gradient(at 50% 0%, #ffffff 0%, #faf8f0 70%, #f5f2e8 100%);
+  background-attachment: fixed;
+  color: #0f172a;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
 }

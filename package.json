@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Zero-Touch QR Cloud Printing Engine for Windows Spoolers",
   "scripts": {
+    "install:all": "npm install && cd server && npm install && cd ../client && npm install && cd ../print-agent && npm install && cd ..",
     "start:server": "cd server && npm run dev",
     "start:agent": "cd print-agent && npm start",
     "start:client": "cd client && npm run dev",

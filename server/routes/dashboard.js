@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+const path = require('path');
+const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const Shop = require('../models/Shop');
@@ -88,6 +90,81 @@ router.post('/printers', authenticateShop, async (req, res) => {
 
     await printer.save();
     res.status(201).json({ success: true, printer });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/dashboard/printers/:printerId - Remove a printer from shop profile
+router.delete('/printers/:printerId', authenticateShop, async (req, res) => {
+  try {
+    const deleted = await Printer.findOneAndDelete({
+      printerId: req.params.printerId,
+      shopId: req.shopId
+    });
+    if (!deleted) return res.status(404).json({ error: 'Printer not found' });
+    res.json({ success: true, message: 'Printer removed successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/dashboard/history - Get list of recent print jobs for shop
+router.get('/history', authenticateShop, async (req, res) => {
+  try {
+    const jobs = await PrintJob.find({ shopId: req.shopId })
+      .sort({ createdAt: -1 })
+      .limit(50);
+    res.json({ success: true, jobs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/dashboard/download-agent - Download compiled Windows print agent executable
+router.get('/download-agent', async (req, res) => {
+  try {
+    const agentPaths = [
+      path.resolve(__dirname, '../../print-agent/KluffPrintAgent.exe'),
+      path.resolve(__dirname, '../print-agent/KluffPrintAgent.exe'),
+      path.resolve(__dirname, '../../print-agent/dist/KluffPrintAgent.exe'),
+      path.join(process.cwd(), 'print-agent/KluffPrintAgent.exe')
+    ];
+
+    let foundPath = agentPaths.find(p => fs.existsSync(p));
+    if (!foundPath) {
+      return res.status(404).json({ error: 'KluffPrintAgent.exe build artifact not found on server' });
+    }
+
+    res.download(foundPath, 'KluffPrintAgent.exe', (err) => {
+      if (err) console.error('Agent download error:', err.message);
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/dashboard/agent-config - Download tailored config.json with current shop token
+router.get('/agent-config', authenticateShop, async (req, res) => {
+  try {
+    const shop = await Shop.findOne({ shopId: req.shopId });
+    if (!shop) return res.status(404).json({ error: 'Shop not found' });
+
+    const config = {
+      serverUrl: process.env.SERVER_URL || 'http://localhost:5000',
+      shopToken: shop.qrToken,
+      printers: {
+        defaultPrinter: '',
+        bwPrinter: '',
+        colorPrinter: '',
+        photoPrinter: '',
+        largeFormatPrinter: ''
+      }
+    };
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename="config.json"');
+    res.send(JSON.stringify(config, null, 2));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

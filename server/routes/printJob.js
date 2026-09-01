@@ -8,6 +8,7 @@ const { v4: uuidv4 } = require('uuid');
 const Shop = require('../models/Shop');
 const Printer = require('../models/Printer');
 const PrintJob = require('../models/PrintJob');
+const QRSession = require('../models/QRSession');
 const { getConnectedAgent } = require('../sockets/agentSocket');
 
 // Configure disk storage for incoming uploaded files
@@ -23,91 +24,249 @@ const storage = multer.diskStorage({
 // Multer upload middleware with mime-type & size validation
 const upload = multer({
   storage,
-  limits: { fileSize: 20 * 1024 * 1024 }, // Max 20MB
+  limits: { fileSize: 30 * 1024 * 1024 }, // Max 30MB per file
   fileFilter: (req, file, cb) => {
-    const allowedMime = ['application/pdf', 'image/jpeg', 'image/png'];
-    if (allowedMime.includes(file.mimetype)) {
+    const allowedMime = [
+      'application/pdf',
+      'image/jpeg',
+      'image/png',
+      'image/jpg',
+      'image/webp'
+    ];
+    if (allowedMime.includes(file.mimetype) || file.originalname.match(/\.(pdf|png|jpe?g|webp)$/i)) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type. Only PDF, JPG, and PNG are allowed.'));
+      cb(new Error('Invalid file type. Only PDF, JPG, and PNG documents are allowed.'));
     }
   }
 });
 
-// POST /api/print-jobs/submit - Submit document for printing
-router.post('/submit', upload.single('document'), async (req, res) => {
+// POST /api/print-jobs/submit or /api/print - Submit single or multiple documents for printing
+const handleSubmitJob = async (req, res) => {
   try {
-    const { shopToken, printerId, copies = 1, colorMode = 'bw', pages = 'all' } = req.body;
+    const {
+      shopToken,
+      sessionToken,
+      printerId,
+      copies = 1,
+      colorMode = 'bw',
+      jobType = 'document',
+      paperSize = 'A4',
+      printSide = 'single',
+      finishing = 'none',
+      paymentMethod = 'counter',
+      pages = 'all'
+    } = req.body;
 
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
+    const files = req.files && req.files.length > 0 ? req.files : (req.file ? [req.file] : []);
+
+    if (files.length === 0) {
+      return res.status(400).json({ error: 'No files uploaded' });
+    }
+
+    // Validate session token with 7-minute TTL & single-use protection
+    let session = null;
+    if (sessionToken) {
+      session = await QRSession.findOne({ sessionToken });
+      if (!session || session.used || new Date() > session.expiresAt) {
+        return res.status(403).json({
+          error: 'SESSION_EXPIRED',
+          message: 'Session expired or inactive. Please scan the QR code at the shop counter to print.'
+        });
+      }
     }
 
     // Validate shop existence and status
-    const shop = await Shop.findOne({ qrToken: shopToken, isActive: true });
+    const shopQuery = shopToken
+      ? { qrToken: shopToken, isActive: true }
+      : (session ? { shopId: session.shopId, isActive: true } : null);
+
+    if (!shopQuery) {
+      return res.status(400).json({ error: 'Shop identification is required' });
+    }
+
+    const shop = await Shop.findOne(shopQuery);
     if (!shop) {
       return res.status(404).json({ error: 'Shop not found or inactive' });
     }
 
-    // Validate printer ownership
-    const printer = await Printer.findOne({ printerId, shopId: shop.shopId });
+    // Validate printer ownership (if specific printer provided)
+    let printer = null;
+    if (printerId) {
+      printer = await Printer.findOne({ printerId, shopId: shop.shopId });
+    }
     if (!printer) {
-      return res.status(404).json({ error: 'Selected printer not found for this shop' });
+      // Fallback: pick first online or available printer
+      printer = await Printer.findOne({ shopId: shop.shopId });
     }
 
-    // Calculate actual page count server-side for PDFs
-    let pageCount = 1;
-    if (req.file.mimetype === 'application/pdf') {
-      const dataBuffer = fs.readFileSync(req.file.path);
-      const pdfData = await pdfParse(dataBuffer);
-      pageCount = pdfData.numpages;
+    const numCopies = Math.max(1, parseInt(copies, 10) || 1);
+    let fileCopiesMap = {};
+    if (req.body.fileCopies) {
+      try {
+        fileCopiesMap = typeof req.body.fileCopies === 'string' ? JSON.parse(req.body.fileCopies) : req.body.fileCopies;
+      } catch (e) {}
     }
 
-    // Compute pricing strictly on the server (Rate * Pages * Copies)
-    const rate = colorMode === 'color' ? shop.pricing.colorPerPage : shop.pricing.bwPerPage;
-    const totalPrice = Number(copies) * pageCount * rate;
+    const rate = colorMode === 'color' ? (shop.pricing?.colorPerPage || 10) : (shop.pricing?.bwPerPage || 2);
+    
+    // Paper-size multiplier
+    const paperMultiplier = {
+      'A4': 1.0,
+      'Legal': 1.25,
+      'A3': 2.0,
+      'A2': 4.0,
+      'A1': 8.0,
+    }[paperSize] || 1.0;
 
-    const jobId = `JOB_${uuidv4().substring(0, 8).toUpperCase()}`;
-    const printJob = new PrintJob({
-      jobId,
-      shopId: shop.shopId,
-      printerId: printer.printerId,
-      filePath: req.file.path.replace(/\\/g, '/'),
-      originalFileName: req.file.originalname,
-      fileType: req.file.mimetype,
-      pageCount,
-      copies: Number(copies),
-      pagesToPrint: pages,
-      colorMode,
-      totalPrice,
-      status: 'PENDING'
-    });
+    const pricePerPage = Math.round(rate * paperMultiplier * 10) / 10;
+    const isDuplex = printSide === 'double';
+    const duplexDiscountPerSheet = isDuplex ? Math.round(pricePerPage * 0.15 * 10) / 10 : 0;
+    const finishingCost = finishing === 'staple' ? 5 : finishing === 'binding' ? 30 : 0;
+    const serviceFee = 0; // No hidden service fees
 
-    await printJob.save();
+    const batchId = `BATCH_${uuidv4().substring(0, 8).toUpperCase()}`;
+    const createdJobs = [];
+    let grandTotalPages = 0;
 
-    // Check if the Print Agent is online and dispatch immediately
-    const agentSocketId = getConnectedAgent(shop.shopId);
-    if (agentSocketId) {
-      req.app.get('io').to(agentSocketId).emit('print-job', {
-        jobId: printJob.jobId,
-        printerId: printer.printerId,
-        printerName: printer.systemPrinterName,
-        fileUrl: `${process.env.SERVER_URL}/${printJob.filePath}`,
-        copies: printJob.copies,
-        pages: printJob.pagesToPrint,
-        colorMode: printJob.colorMode
+    // Process each uploaded file in order
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const thisFileCopies = fileCopiesMap[i] ? Math.max(1, parseInt(fileCopiesMap[i], 10)) : numCopies;
+      let pageCount = 1;
+      if (file.mimetype === 'application/pdf' || file.originalname.endsWith('.pdf')) {
+        try {
+          const dataBuffer = fs.readFileSync(file.path);
+          const pdfData = await pdfParse(dataBuffer);
+          pageCount = Math.max(1, pdfData.numpages || 1);
+        } catch (pdfErr) {
+          console.warn(`[PDF Parse Warning for ${file.originalname}]:`, pdfErr.message);
+          pageCount = 1;
+        }
+      }
+
+      const totalFilePages = pageCount * thisFileCopies;
+      grandTotalPages += totalFilePages;
+
+      const rawFileCost = pricePerPage * totalFilePages;
+      const fileDiscount = isDuplex ? Math.round(duplexDiscountPerSheet * totalFilePages * 10) / 10 : 0;
+      const filePrintingCost = Math.max(1, Math.round((rawFileCost - fileDiscount) * 10) / 10);
+      const jobId = `JOB_${uuidv4().substring(0, 8).toUpperCase()}`;
+
+      const printJob = new PrintJob({
+        jobId,
+        batchId,
+        shopId: shop.shopId,
+        printerId: printer ? printer.printerId : 'DEFAULT_PRINTER',
+        filePath: file.path.replace(/\\/g, '/'),
+        originalFileName: file.originalname,
+        fileType: file.mimetype,
+        jobType: jobType || 'document',
+        pageCount,
+        copies: thisFileCopies,
+        pagesToPrint: pages,
+        colorMode,
+        paperSize,
+        printSide,
+        finishing,
+        paymentMethod,
+        paymentStatus: paymentMethod === 'counter' ? 'PENDING' : 'PAID',
+        totalPrice: filePrintingCost,
+        status: 'PENDING'
       });
-      printJob.status = 'SENT_TO_AGENT';
+
       await printJob.save();
+      createdJobs.push(printJob);
+    }
+
+    const totalBatchPrice = createdJobs.reduce((sum, j) => sum + j.totalPrice, 0) + finishingCost + serviceFee;
+
+    // Dispatch jobs to connected Print Agent if online
+    const agentSocketId = getConnectedAgent(shop.shopId);
+    const ioInstance = req.app.get('io');
+
+    for (const job of createdJobs) {
+      if (agentSocketId && ioInstance) {
+        ioInstance.to(agentSocketId).emit('print-job', {
+          jobId: job.jobId,
+          batchId: job.batchId,
+          printerId: job.printerId,
+          systemPrinterName: printer ? printer.systemPrinterName : undefined,
+          fileUrl: `${process.env.SERVER_URL || 'http://localhost:5000'}/${job.filePath}`,
+          originalFileName: job.originalFileName,
+          fileType: job.fileType,
+          jobType: job.jobType,
+          copies: job.copies,
+          pages: job.pagesToPrint,
+          colorMode: job.colorMode,
+          paperSize: job.paperSize,
+          printSide: job.printSide
+        });
+
+        job.status = 'SENT_TO_AGENT';
+        await job.save();
+      }
+    }
+
+    // Mark session as used (single-use protection)
+    if (session) {
+      session.used = true;
+      session.usedAt = new Date();
+      await session.save();
     }
 
     res.json({
       success: true,
-      jobId,
-      totalPrice,
-      pageCount,
-      status: printJob.status
+      batchId,
+      jobId: createdJobs[0]?.jobId,
+      jobIds: createdJobs.map(j => j.jobId),
+      totalJobs: createdJobs.length,
+      totalPages: grandTotalPages,
+      totalPrice: totalBatchPrice,
+      status: createdJobs[0]?.status || 'PENDING',
+      jobs: createdJobs
     });
+  } catch (err) {
+    console.error('[Submit Print Job Error]:', err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+router.post('/submit', upload.any(), handleSubmitJob);
+router.post('/', upload.any(), handleSubmitJob);
+
+// GET /api/print-jobs/batch/:batchId - Get real-time status of all jobs in a batch
+router.get('/batch/:batchId', async (req, res) => {
+  try {
+    const jobs = await PrintJob.find({ batchId: req.params.batchId });
+    if (!jobs || jobs.length === 0) {
+      return res.status(404).json({ error: 'Batch not found' });
+    }
+
+    const totalCost = jobs.reduce((sum, j) => sum + j.totalPrice, 0);
+    const allCompleted = jobs.every(j => j.status === 'COMPLETED');
+    const anyFailed = jobs.some(j => j.status === 'FAILED');
+    const overallStatus = anyFailed ? 'FAILED' : allCompleted ? 'COMPLETED' : 'PRINTING';
+
+    res.json({
+      batchId: req.params.batchId,
+      status: overallStatus,
+      totalCost,
+      jobs
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/print-jobs/status/:jobId - Get status of a single job
+router.get('/status/:jobId', async (req, res) => {
+  try {
+    const job = await PrintJob.findOne({ jobId: req.params.jobId });
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    res.json({ success: true, job });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

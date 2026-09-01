@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { UserPlus, Loader2, AlertCircle } from 'lucide-react';
-
-const SERVER_URL = 'http://localhost:5000';
+import { SERVER_URL } from '../config';
 
 export default function Register() {
   const [formData, setFormData] = useState({

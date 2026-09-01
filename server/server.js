@@ -34,14 +34,62 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.set('io', io);
 
 // API Routes
+app.use('/api/session', require('./routes/session'));
 app.use('/api/print-jobs', printJobRoutes);
+app.use('/api/print', printJobRoutes);
 app.use('/api/shops', shopRoutes);
+app.use('/api/shop', shopRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 
 // Basic health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', uptime: process.uptime() });
+});
+
+// POST /api/verify-transaction - Instantly confirm payment and broadcast payment_success event
+app.post('/api/verify-transaction', (req, res) => {
+  const { orderId, sessionId, transactionId, amount, status = 'SUCCESS' } = req.body;
+  const room = orderId || sessionId;
+
+  if (!room) {
+    return res.status(400).json({ error: 'orderId or sessionId is required' });
+  }
+
+  // Instant zero-delay WebSocket push event to customer room
+  io.to(`payment_${room}`).emit('payment_success', {
+    orderId,
+    sessionId,
+    transactionId: transactionId || `TXN_${Date.now()}`,
+    amount,
+    status,
+    timestamp: new Date().toISOString()
+  });
+
+  console.log(`[Payment] Instant payment_success emitted to payment_${room}`);
+
+  res.json({
+    success: true,
+    message: 'Payment verified and real-time event dispatched',
+    room: `payment_${room}`
+  });
+});
+
+// Webhook alias for payment providers
+app.post('/api/payment-webhook', (req, res) => {
+  const { orderId, tr, sessionId, status } = req.body;
+  const targetId = orderId || tr || sessionId;
+
+  if (targetId) {
+    io.to(`payment_${targetId}`).emit('payment_success', {
+      orderId: targetId,
+      status: status || 'SUCCESS',
+      timestamp: new Date().toISOString()
+    });
+    console.log(`[Webhook] payment_success emitted to payment_${targetId}`);
+  }
+
+  res.json({ received: true });
 });
 
 // Initialize Socket.IO connection handling
