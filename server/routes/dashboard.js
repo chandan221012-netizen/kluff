@@ -7,6 +7,7 @@ const { v4: uuidv4 } = require('uuid');
 const Shop = require('../models/Shop');
 const Printer = require('../models/Printer');
 const PrintJob = require('../models/PrintJob');
+const { getConnectedAgent } = require('../sockets/agentSocket');
 
 // Authentication Middleware for Protected Routes
 const authenticateShop = async (req, res, next) => {
@@ -43,6 +44,21 @@ router.get('/stats', authenticateShop, async (req, res) => {
     const totalRevenue = revenueData.length > 0 ? revenueData[0].totalRevenue : 0;
     const printers = await Printer.find({ shopId: req.shopId });
 
+    const os = require('os');
+    let localIp = 'localhost';
+    const ifaces = os.networkInterfaces();
+    for (const name of Object.keys(ifaces)) {
+      for (const net of ifaces[name]) {
+        if (net.family === 'IPv4' && !net.internal) {
+          localIp = net.address;
+          break;
+        }
+      }
+      if (localIp !== 'localhost') break;
+    }
+
+    const isAgentOnline = Boolean(getConnectedAgent(shop.shopId));
+
     res.json({
       shopName: shop.name,
       qrToken: shop.qrToken,
@@ -50,7 +66,14 @@ router.get('/stats', authenticateShop, async (req, res) => {
       totalJobs,
       completedJobs,
       totalRevenue,
-      printers
+      printers,
+      availablePrinters: shop.availablePrinters || [],
+      printerRouting: shop.printerRouting || {},
+      isAgentOnline,
+      serverIp: localIp,
+      subscription: shop.subscription || {},
+      pairedHardwareId: shop.subscription?.pairedHardwareId || '',
+      pairedComputerName: shop.subscription?.pairedComputerName || ''
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -104,6 +127,66 @@ router.delete('/printers/:printerId', authenticateShop, async (req, res) => {
     });
     if (!deleted) return res.status(404).json({ error: 'Printer not found' });
     res.json({ success: true, message: 'Printer removed successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/dashboard/printer-routing - Get reported printers, routing matrix, and agent status
+router.get('/printer-routing', authenticateShop, async (req, res) => {
+  try {
+    const shop = await Shop.findOne({ shopId: req.shopId });
+    if (!shop) return res.status(404).json({ error: 'Shop not found' });
+
+    const isOnline = Boolean(getConnectedAgent(shop.shopId));
+    res.json({
+      success: true,
+      isAgentOnline: isOnline,
+      availablePrinters: shop.availablePrinters || [],
+      routing: shop.printerRouting || {}
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/dashboard/printer-routing - Update task-based printer routing matrix
+router.post('/printer-routing', authenticateShop, async (req, res) => {
+  try {
+    const {
+      defaultPrinter = '',
+      bwPrinter = '',
+      colorPrinter = '',
+      a3Printer = '',
+      a2Printer = '',
+      a1Printer = '',
+      photoPrinter = ''
+    } = req.body;
+
+    const newRouting = {
+      defaultPrinter,
+      bwPrinter,
+      colorPrinter,
+      a3Printer,
+      a2Printer,
+      a1Printer,
+      photoPrinter
+    };
+
+    const shop = await Shop.findOneAndUpdate(
+      { shopId: req.shopId },
+      { printerRouting: newRouting },
+      { new: true }
+    );
+
+    // Push real-time update to active connected agent
+    const agentSocketId = getConnectedAgent(shop.shopId);
+    const ioInstance = req.app.get('io');
+    if (agentSocketId && ioInstance) {
+      ioInstance.to(agentSocketId).emit('update-printer-routing', newRouting);
+    }
+
+    res.json({ success: true, routing: shop.printerRouting });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

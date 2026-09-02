@@ -1,8 +1,4 @@
 @echo off
-title AUTOPRINT Desktop Background Agent
-echo ========================================================
-echo         AUTOPRINT Windows Print Agent
-echo ========================================================
-echo.
-node index.js
-pause
+title Kluff AutoPrint Desktop Agent
+start "" "%~dp0KluffPrintAgent.exe"
+exit

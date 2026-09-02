@@ -7,10 +7,21 @@ import ShopDashboard from './pages/ShopDashboard';
 import Login from './pages/Login';
 import Register from './pages/Register';
 
+import FounderDashboard from './pages/FounderDashboard';
+import FounderLogin from './pages/FounderLogin';
+
 function ProtectedRoute({ children }) {
   const token = localStorage.getItem('ownerToken');
   if (!token) {
     return <Navigate to="/login" replace />;
+  }
+  return children;
+}
+
+function FounderProtectedRoute({ children }) {
+  const token = localStorage.getItem('founderToken');
+  if (!token) {
+    return <Navigate to="/founder/login" replace />;
   }
   return children;
 }
@@ -33,6 +44,17 @@ export default function App() {
               <ProtectedRoute>
                 <ShopDashboard />
               </ProtectedRoute>
+            }
+          />
+
+          {/* Master Founder Dashboard Routes */}
+          <Route path="/founder/login" element={<FounderLogin />} />
+          <Route
+            path="/founder"
+            element={
+              <FounderProtectedRoute>
+                <FounderDashboard />
+              </FounderProtectedRoute>
             }
           />
 

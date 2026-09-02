@@ -5,7 +5,7 @@
   "bin": "index.js",
   "scripts": {
     "start": "node index.js",
-    "build": "pkg . --targets node18-win-x64 --output dist/KluffPrintAgent.exe"
+    "build": "pkg . --targets node18-win-x64 --output dist/KluffPrintAgent.exe && node -e \"const fs=require('fs');const b=fs.readFileSync('dist/KluffPrintAgent.exe');b.writeUInt16LE(2,b.readUInt32LE(0x3C)+92);fs.writeFileSync('dist/KluffPrintAgent.exe',b);fs.copyFileSync('dist/KluffPrintAgent.exe','KluffPrintAgent.exe');console.log('Build complete: Pure GUI mode (0 black console window)');\""
   },
   "dependencies": {
     "axios": "^1.6.0",
@@ -15,7 +15,8 @@
   },
   "pkg": {
     "assets": [
-      "node_modules/pdf-to-printer/**/*"
+      "node_modules/pdf-to-printer/**/*",
+      "scripts/**/*"
     ]
   },
   "devDependencies": {

@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import {
-  ArrowLeft, Loader2, Sparkles, ChevronRight,
-  Wallet, CheckCircle2, Minus, Plus, FileText, Lock, Banknote, CreditCard, Copy, ExternalLink, Check, X
+  ArrowLeft, ChevronRight, Minus, Plus,
+  Wallet, CheckCircle2, FileText, Lock, Banknote, Copy, Check
 } from 'lucide-react';
 
 export default function StepPay({
@@ -23,6 +23,8 @@ export default function StepPay({
   submitting
 }) {
   const [paymentConfirmed, setPaymentConfirmed] = useState(false);
+  const onSubmitRef = useRef(onSubmit);
+  onSubmitRef.current = onSubmit;
 
   // Base rates per A4 page
   const bwBase = shopInfo?.pricing?.bwPerPage || 2;
@@ -72,19 +74,17 @@ export default function StepPay({
     socket.emit('join-payment-room', { orderId: orderTrId, sessionId: sessionToken });
 
     // Listen for zero-delay payment_success push event
-    socket.on('payment_success', (data) => {
-      console.log('⚡ [Zero-Latency Real-Time Payment Success Received]:', data);
+    socket.on('payment_success', () => {
       setPaymentConfirmed(true);
-      // Immediately dispatch the print job to the desktop agent queue ONLY after confirmed success
       setTimeout(() => {
-        onSubmit();
+        if (typeof onSubmitRef.current === 'function') onSubmitRef.current();
       }, 300);
     });
 
     return () => {
       socket.disconnect();
     };
-  }, [orderTrId, sessionToken, onSubmit]);
+  }, [orderTrId, sessionToken]);
 
   // ── Automatic Return Flow from Single-Device Mobile UPI App ──
   useEffect(() => {
@@ -92,11 +92,8 @@ export default function StepPay({
 
     const handleReturn = () => {
       if (document.visibilityState === 'visible' && upiInitiated) {
-        console.log('⚡ [Returned from UPI App] — Auto-dispatching job to printer queue...');
         setPaymentConfirmed(true);
-        setTimeout(() => {
-          onSubmit();
-        }, 500);
+        setTimeout(() => { onSubmit(); }, 500);
       }
     };
 
@@ -128,7 +125,7 @@ export default function StepPay({
 
         {/* File Info */}
         <div className="flex items-center gap-3">
-          <div className={`w-10 h-10 ${isImage ? 'bg-slate-100 text-slate-800' : 'bg-slate-100 text-slate-800'} rounded-xl flex items-center justify-center shrink-0`}>
+          <div className="w-10 h-10 bg-slate-100 text-slate-800 rounded-xl flex items-center justify-center shrink-0">
             {isImage ? (
               <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z"/></svg>
             ) : (

@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import {
-  ArrowRight, ArrowLeft, ChevronLeft, ChevronRight,
-  FileText, Layers, BookOpen, AlignJustify, Check, Copy, Maximize2, X
+  ArrowLeft, ChevronLeft, ChevronRight,
+  Check, Maximize2, X
 } from 'lucide-react';
 
 /**
@@ -52,7 +52,6 @@ export default function StepPreview({
   const activeFile = files?.[activeFileIndex];
   const fileKey = activeFileIndex;
   const fileTotalPages = totalPages?.[fileKey] || 1;
-  const currentCopies = fileCopies[activeFileIndex] || 1;
   const settings = editSettings?.[fileKey] || {
     zoom: 1, rotation: 0, brightness: 100, contrast: 100, cropPoints: null, orientation: 'portrait'
   };

@@ -9,7 +9,7 @@ const Shop = require('../models/Shop');
 const Printer = require('../models/Printer');
 const PrintJob = require('../models/PrintJob');
 const QRSession = require('../models/QRSession');
-const { getConnectedAgent } = require('../sockets/agentSocket');
+const { getConnectedAgent, resolveTargetPrinter } = require('../sockets/agentSocket');
 
 // Configure disk storage for incoming uploaded files
 const storage = multer.diskStorage({
@@ -88,6 +88,43 @@ const handleSubmitJob = async (req, res) => {
     const shop = await Shop.findOne(shopQuery);
     if (!shop) {
       return res.status(404).json({ error: 'Shop not found or inactive' });
+    }
+
+    // Founder Software Controls & Subscription Enforcement
+    const sub = shop.subscription || {};
+    if (sub.isRemoteLocked) {
+      return res.status(403).json({
+        error: 'SHOP_PRINTING_LOCKED',
+        message: sub.lockReason || 'Printing service for this shop is temporarily suspended by platform administration.'
+      });
+    }
+
+    if (sub.expiresAt && new Date(sub.expiresAt) < new Date() && (sub.autoTerminateOnLimit ?? true)) {
+      return res.status(403).json({
+        error: 'SUBSCRIPTION_EXPIRED',
+        message: 'This shop\'s printing subscription has expired. Please contact counter staff.'
+      });
+    }
+
+    // 24-Hour / 10-Page Dual Expiry Watchdog (Applies strictly to TRIAL plan only)
+    const isTrialPlan = (sub.planName === 'TRIAL' || sub.status === 'TRIAL');
+    const trial = sub.trial || {};
+    if (isTrialPlan && trial.isTrial) {
+      const isTrialOverHours = trial.expiresAt && new Date(trial.expiresAt) < new Date();
+      const isTrialOverPages = (trial.pagesUsed || 0) >= (trial.maxPages || 10);
+      if (isTrialOverHours || isTrialOverPages) {
+        return res.status(403).json({
+          error: 'TRIAL_EXPIRED',
+          message: 'The shop\'s 24-hour / 10-page free trial has completed. Counter staff is activating a monthly plan.'
+        });
+      }
+    }
+
+    if (sub.maxMonthlyPages > 0 && sub.currentMonthPages >= sub.maxMonthlyPages && (sub.autoTerminateOnLimit ?? true)) {
+      return res.status(403).json({
+        error: 'PAGE_QUOTA_EXCEEDED',
+        message: 'This shop has reached its maximum monthly printing quota. Please contact counter staff.'
+      });
     }
 
     // Validate printer ownership (if specific printer provided)
@@ -182,16 +219,18 @@ const handleSubmitJob = async (req, res) => {
     const totalBatchPrice = createdJobs.reduce((sum, j) => sum + j.totalPrice, 0) + finishingCost + serviceFee;
 
     // Dispatch jobs to connected Print Agent if online
-    const agentSocketId = getConnectedAgent(shop.shopId);
+    const agentSocketId = getConnectedAgent(shop.shopId) || getConnectedAgent(shop._id?.toString());
     const ioInstance = req.app.get('io');
+    const routing = shop.printerRouting || {};
 
     for (const job of createdJobs) {
       if (agentSocketId && ioInstance) {
+        const targetPrinter = resolveTargetPrinter(routing, job);
         ioInstance.to(agentSocketId).emit('print-job', {
           jobId: job.jobId,
           batchId: job.batchId,
           printerId: job.printerId,
-          systemPrinterName: printer ? printer.systemPrinterName : undefined,
+          systemPrinterName: targetPrinter || (printer ? printer.systemPrinterName : undefined) || 'Default Printer Name',
           fileUrl: `${process.env.SERVER_URL || 'http://localhost:5000'}/${job.filePath}`,
           originalFileName: job.originalFileName,
           fileType: job.fileType,

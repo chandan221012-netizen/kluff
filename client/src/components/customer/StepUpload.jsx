@@ -7,9 +7,7 @@ import {
   X,
   ArrowRight,
   Maximize2,
-  Eye,
 } from 'lucide-react';
-import { SERVER_URL } from '../../config';
 import { saveFilesToStorage, loadFilesFromStorage } from '../../utils/fileStorage';
 
 export default function StepUpload({
@@ -30,70 +28,31 @@ export default function StepUpload({
 
   const paperSizeOptions = ['A4', 'A3', 'A2', 'A1', 'Legal'];
 
-  const sendTerminalLog = (event, details) => {
-    try {
-      fetch(`${SERVER_URL}/api/session/log`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event, details })
-      }).catch(() => {});
-    } catch (e) {}
-  };
-
-  // Lifecycle reporting to diagnose mobile browser reload / unmount events
+  // Restore files from IndexedDB if page was killed by Android/iOS background killer
   useEffect(() => {
-    // Check navigation type to see if page actually reloaded from scratch
-    const navEntries = performance.getEntriesByType?.('navigation');
-    const navType = navEntries?.[0]?.type || performance.navigation?.type;
-    
-    sendTerminalLog('STEP_UPLOAD_MOUNTED', {
-      url: window.location.href,
-      filesCount: files.length,
-      navigationType: navType,
-      isReload: navType === 'reload' || navType === 1
-    });
-
-    // Directly restore from IndexedDB if mounting after reload with 0 files
     if (files.length === 0) {
       loadFilesFromStorage().then((stored) => {
         if (stored && stored.length > 0 && typeof setFiles === 'function') {
           setFiles(stored);
-          sendTerminalLog('STEP_UPLOAD_RESTORED_FILES', { count: stored.length });
         }
       });
     }
 
     const handleVisibilityChange = () => {
-      sendTerminalLog('VISIBILITY_CHANGE', {
-        state: document.visibilityState,
-        filesCount: files.length
-      });
-      // When user returns to tab after selecting files
       if (document.visibilityState === 'visible' && files.length === 0) {
         loadFilesFromStorage().then((stored) => {
           if (stored && stored.length > 0 && typeof setFiles === 'function') {
             setFiles(stored);
-            sendTerminalLog('STEP_UPLOAD_VISIBILITY_RESTORED_FILES', { count: stored.length });
           }
         });
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    const handleBeforeUnload = (e) => {
-      sendTerminalLog('PAGE_BEFORE_UNLOAD', {
-        filesCount: files.length,
-        url: window.location.href
-      });
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-
     return () => {
-      sendTerminalLog('STEP_UPLOAD_UNMOUNTED', { filesCount: files.length });
       document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-  }, []);
+  }, [files.length, setFiles]);
 
   const handleOpenPreview = async (file) => {
     if (!file) return;
@@ -103,7 +62,6 @@ export default function StepUpload({
     try {
       const url = URL.createObjectURL(file);
       setPreviewModalUrl(url);
-      sendTerminalLog('FILE_PREVIEW_OPENED', { fileName: file.name, size: file.size });
 
       // If PDF, render first page to high-res image canvas for instant mobile preview
       if (file.type === 'application/pdf' || file.name?.toLowerCase().endsWith('.pdf')) {
@@ -176,14 +134,6 @@ export default function StepUpload({
     if (!incomingFileList || incomingFileList.length === 0) return;
     try {
       const newFilesArray = Array.from(incomingFileList);
-      const fileNames = newFilesArray.map(f => `${f.name} (${(f.size / (1024 * 1024)).toFixed(2)} MB)`);
-      
-      // Log directly to server terminal!
-      sendTerminalLog('FILES_SELECTED', {
-        count: newFilesArray.length,
-        files: fileNames,
-        currentLocation: window.location.href
-      });
 
       // 1. Immediately update state and transition to Edit screen (0 ms latency)
       const existing = Array.isArray(files) ? files : [];
@@ -191,10 +141,6 @@ export default function StepUpload({
 
       if (typeof setFiles === 'function') {
         setFiles(combined);
-        sendTerminalLog('SET_FILES_UPDATED', {
-          previousCount: existing.length,
-          newCount: combined.length
-        });
       }
 
       if (typeof onNext === 'function') {
@@ -202,9 +148,7 @@ export default function StepUpload({
       }
 
       // 2. Persist to IndexedDB in background without holding up screen transition
-      saveFilesToStorage(combined)
-        .then(() => sendTerminalLog('INDEXEDDB_PERSISTED_SUCCESS', { count: combined.length }))
-        .catch(storageErr => sendTerminalLog('INDEXEDDB_PERSISTED_ERROR', { error: storageErr?.message }));
+      saveFilesToStorage(combined).catch(() => {});
     } catch (err) {
       console.error('Error adding files:', err);
     }

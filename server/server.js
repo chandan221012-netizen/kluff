@@ -41,6 +41,7 @@ app.use('/api/shops', shopRoutes);
 app.use('/api/shop', shopRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/founder', require('./routes/founder'));
 
 // Basic health check endpoint
 app.get('/health', (req, res) => {
@@ -90,6 +91,12 @@ app.post('/api/payment-webhook', (req, res) => {
   }
 
   res.json({ received: true });
+});
+
+// Centralized error handling middleware
+app.use((err, req, res, next) => {
+  console.error('[API Error]', err.message);
+  res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
 });
 
 // Initialize Socket.IO connection handling

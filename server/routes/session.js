@@ -5,7 +5,7 @@ const Shop = require('../models/Shop');
 const Printer = require('../models/Printer');
 const QRSession = require('../models/QRSession');
 
-const SESSION_TTL_MS = 7 * 60 * 1000; // Strict 7 minutes TTL
+const SESSION_TTL_MS = 8 * 60 * 1000; // 8 minutes TTL
 
 /**
  * POST /api/session/init

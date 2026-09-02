@@ -4,8 +4,10 @@
   "printers": {
     "defaultPrinter": "EPSON M1120 Series",
     "bwPrinter": "EPSON M1120 Series",
-    "colorPrinter": "",
-    "photoPrinter": "",
-    "largeFormatPrinter": ""
+    "colorPrinter": "EPSON M1120 Series",
+    "a3Printer": "",
+    "a2Printer": "",
+    "a1Printer": "",
+    "photoPrinter": ""
   }
 }

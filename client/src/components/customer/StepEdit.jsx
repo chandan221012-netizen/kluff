@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   RotateCw, RotateCcw, Crop, Sun, Contrast,
-  ChevronLeft, ChevronRight, ArrowRight, ArrowLeft,
-  Check, SlidersHorizontal, ZoomIn, Move, RefreshCw,
+  ChevronLeft, ChevronRight, ArrowLeft,
+  Check, SlidersHorizontal, ZoomIn,
   FileText, ChevronDown, X, Maximize2
 } from 'lucide-react';
 import SafeSlider from './SafeSlider';

@@ -7,7 +7,7 @@
     "start:server": "cd server && npm run dev",
     "start:agent": "cd print-agent && npm start",
     "start:client": "cd client && npm run dev",
-    "dev": "concurrently --kill-others-on-fail -n \"SERVER,AGENT,CLIENT\" -c \"blue,green,magenta\" \"npm run start:server\" \"npm run start:agent\" \"npm run start:client\""
+    "dev": "concurrently -n \"SERVER,AGENT,CLIENT\" -c \"blue,green,magenta\" \"npm run start:server\" \"npm run start:agent\" \"npm run start:client\""
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

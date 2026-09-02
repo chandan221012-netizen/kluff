@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import io from 'socket.io-client';
-import { Wifi, ArrowLeft, Check, ArrowRight, Clock, QrCode, ShieldAlert, RotateCcw } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, Clock, QrCode, RotateCcw } from 'lucide-react';
 import { SERVER_URL } from '../config';
 
 import ProgressBar from '../components/customer/ProgressBar';
@@ -18,12 +18,28 @@ let cachedShopInfo = null;
 let cachedSessionToken = null;
 let cachedExpiresAt = null;
 let cachedRemainingSeconds = null;
+let cachedForToken = null; // tracks which token this cache belongs to
 
 export default function CustomerPrint() {
   const { token } = useParams();
   const navigate = useNavigate();
   // Capture the token ONCE at mount time so URL changes never retrigger this
   const initialTokenRef = useRef(token);
+  
+  // FIX: If the URL token changed (new QR scan), reset all cached state
+  if (cachedForToken && cachedForToken !== token) {
+    cachedFiles = [];
+    cachedInitialized = false;
+    cachedShopInfo = null;
+    cachedSessionToken = null;
+    cachedExpiresAt = null;
+    cachedRemainingSeconds = null;
+    cachedForToken = null;
+    initialTokenRef.current = token;
+    clearFilesFromStorage().catch(() => {});
+  }
+  cachedForToken = token;
+
   const sessionInitializedRef = useRef(cachedInitialized);
 
   // Steps: 1=Upload, 2=Edit, 3=Preview, 4=Pay, 5=Success/Print Another
@@ -57,16 +73,6 @@ export default function CustomerPrint() {
         if (stored && stored.length > 0) {
           cachedFiles = stored;
           setFilesState(stored);
-          try {
-            fetch(`${SERVER_URL}/api/session/log`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                event: 'FILES_RESTORED_FROM_INDEXEDDB',
-                details: { count: stored.length, files: stored.map(f => f.name) }
-              })
-            }).catch(() => {});
-          } catch (e) {}
         }
       });
     }
@@ -305,6 +311,7 @@ export default function CustomerPrint() {
   }, [expiresAt, isExpired]);
 
   // 3. 7-Minute Inactivity Watchdog
+  // 3. 8-Minute Inactivity Watchdog
   useEffect(() => {
     if (isExpired) return;
     let inactivityTimer;
@@ -315,9 +322,9 @@ export default function CustomerPrint() {
         // Never expire if files are selected
         if (!cachedFiles || cachedFiles.length === 0) {
           setIsExpired(true);
-          setExpiredReason('Session expired or inactive. Please scan the QR code at the shop counter to print.');
+          setExpiredReason('Session expired. Please scan the QR code at the shop counter to print.');
         }
-      }, 7 * 60 * 1000);
+      }, 8 * 60 * 1000); // 8 minutes TTL
     };
 
     resetInactivity();
@@ -388,7 +395,7 @@ export default function CustomerPrint() {
       if (!res.ok) {
         if (res.status === 403 && (data.error === 'SESSION_EXPIRED' || data.error?.includes('Session'))) {
           setIsExpired(true);
-          setExpiredReason(data.message || 'Session expired or inactive. Please scan the QR code at the shop counter to print.');
+          setExpiredReason(data.message || 'Session expired. Please scan the QR code at the shop counter to print.');
           return;
         }
         throw new Error(data.error || 'Failed to submit print job');
@@ -399,6 +406,9 @@ export default function CustomerPrint() {
       setBatchJobs(data.jobs || [{ jobId: data.jobId, status: 'RECEIVED', originalFileName: files[0]?.name }]);
       setStatus('RECEIVED');
       setCurrentStep(5);
+      // FIX: Clear IndexedDB immediately after successful submit
+      // so files don't persist and reappear on next QR scan
+      clearFilesFromStorage().catch(() => {});
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -445,7 +455,7 @@ export default function CustomerPrint() {
     );
   }
 
-  // 7-Minute QR Session Expired Screen (Blocks bookmarks, old links & inactivity)
+  // 8-Minute QR Session Expired Screen (Blocks bookmarks, old links & inactivity)
   if (isExpired) {
     return (
       <div className="min-h-screen py-10 px-4 flex items-center justify-center">
@@ -455,9 +465,9 @@ export default function CustomerPrint() {
           </div>
 
           <div className="space-y-2">
-            <h2 className="text-xl font-black text-slate-900 tracking-tight">Session Expired</h2>
+            <h2 className="text-xl font-black text-slate-900 tracking-tight">Scan It For Print</h2>
             <p className="text-sm font-semibold text-slate-700 leading-relaxed">
-              Session expired or inactive. Please scan the QR code at the shop counter to print.
+              Session expired. Please scan the QR code at the shop counter to print.
             </p>
           </div>
 
@@ -474,7 +484,7 @@ export default function CustomerPrint() {
               className="w-full bg-slate-900 hover:bg-black active:scale-[0.98] text-white font-bold py-3.5 rounded-2xl text-xs uppercase tracking-wider transition-all shadow-md flex items-center justify-center gap-2"
             >
               <RotateCcw className="w-4 h-4" />
-              <span>Scan Again at Counter</span>
+              <span>Scan It For Print</span>
             </button>
           </div>
         </div>
@@ -507,7 +517,7 @@ export default function CustomerPrint() {
               className="w-full bg-slate-900 hover:bg-black active:scale-[0.98] text-white font-bold py-3.5 rounded-2xl text-xs uppercase tracking-wider transition-all shadow-md flex items-center justify-center gap-2"
             >
               <RotateCcw className="w-4 h-4" />
-              <span>Scan Again / Try Test Shop</span>
+              <span>Scan It For Print</span>
             </button>
           </div>
         </div>
