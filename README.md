@@ -229,10 +229,18 @@ FOUNDER_PASSWORD=your_founder_password_here
 npm run dev
 ```
 
-### 4. Accessing Application Portals
-* **Customer Print Portal:** `http://localhost:5173/print/test-shop-token-123`
-* **Founder Administration Portal:** `http://localhost:5173/founder`
-* **Shop Merchant Dashboard:** `http://localhost:5173/dashboard`
+### 4. 🔗 Important System Links & Access Portals
+
+| Portal | Direct URL | Description & Access |
+|---|---|---|
+| 📱 **Customer Print Portal** | [`http://localhost:5173/print/test-shop-token-123`](http://localhost:5173/print/test-shop-token-123) | Customer mobile upload wizard (Upload, Edit, Preview, UPI Pay) |
+| ⚡ **Dev Test Shortcut** | [`http://localhost:5173/test`](http://localhost:5173/test) | Quick redirect directly to customer active shop session |
+| 🏪 **Shop Owner Dashboard** | [`http://localhost:5173/dashboard`](http://localhost:5173/dashboard) | Live print queue, daily revenue, printer routing, and per-page rates |
+| 🔑 **Shopkeeper Login** | [`http://localhost:5173/login`](http://localhost:5173/login) | Merchant login (`test@shop.com` / `123456`) |
+| 📝 **New Shop Registration** | [`http://localhost:5173/register`](http://localhost:5173/register) | Onboard new shop partner and generate initial QR token |
+| 👑 **Master Founder Dashboard** | [`http://localhost:5173/founder`](http://localhost:5173/founder) | Platform admin: Remote terminal killswitches, quotas & subscriptions |
+| 🔐 **Founder Login** | [`http://localhost:5173/founder/login`](http://localhost:5173/founder/login) | Authenticate into master founder administrative portal |
+| 🩺 **Backend Health API** | [`http://localhost:5000/health`](http://localhost:5000/health) | Real-time cloud server uptime and database connectivity check |
 
 ---
 
