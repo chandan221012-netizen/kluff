@@ -2,8 +2,9 @@
 
 > **Component:** `print-agent/`  
 > **Target OS:** Windows 10 / 11 / Windows Server  
-> **Execution Mode:** Standalone Compiled Binary (`KluffPrintAgent.exe`) or Background Windows Service with Watchdog  
-> **Local UI Portal:** `http://localhost:5050`  
+> **Execution Mode:** Standalone Compiled Pure-GUI Binary (`KluffPrintAgent.exe`)  
+> **Subsystem:** Windows GUI (Subsystem 2 — 0 Console Windows, 0 Black Boxes)  
+> **Visual Feedback:** Floating White & Emerald Green WPF Toast Card (`toast-ui.ps1`)  
 
 ---
 
@@ -14,135 +15,87 @@ The **AutoPrint Desktop Agent** bridges cloud-based print requests with physical
 ```mermaid
 flowchart TD
     subgraph Cloud Infrastructure
-        CS[Cloud Server - Node.js / Express] <-->|Socket.io TLS WSS| WSClient[Agent Socket Client]
+        CS[Cloud Server - Node.js / Express] <-->|Socket.io TLS WSS| WSClient[Agent Socket Client: src/socketClient.js]
     end
 
-    subgraph Desktop Agent Internal Core
-        WSClient --> QueueManager[Local Persistent Job Queue: job-queue.json]
-        QueueManager --> Semaphore[Concurrent Job Semaphore: Max 2]
-        Semaphore --> Router[Dynamic Printer Role Router]
+    subgraph Desktop Agent Modular Core
+        WSClient --> Guard[TCP Mutex Guard :5055: src/mutex.js]
+        Guard --> HWLock[Motherboard UUID Fingerprint: src/hardware.js]
+        HWLock --> Router[Dynamic Printer Role Router: src/printerService.js]
         
-        subgraph Hardware Discovery & Spooling
-            Discovery[PowerShell Get-CimInstance Win32_Printer] --> Router
-            Router --> Transformer[PDF & Image Dimension Transformer: pdf-lib]
-            Transformer --> Spooler[SumatraPDF Silent CLI / Win32 Spooler]
+        subgraph Processing & Spooling Engine
+            Discovery[Win32_Printer Asynchronous Discovery] --> Router
+            Router --> ImageEng[BT.601 Grayscale GDI Engine: src/imageProcessor.js]
+            ImageEng --> Spooler[SumatraPDF CLI Direct Spooler]
         end
 
-        subgraph Local Operator Dashboard
-            HTTPServer[Built-in Lightweight HTTP Server :5050] <--> Router
-            HTTPServer <--> QueueManager
-            Browser[Local Browser Operator UI] <--> HTTPServer
+        subgraph Visual Feedback System
+            WSClient --> Toast[Floating Emerald Toast Card: src/toastService.js]
+            Toast --> UI[5-Step Progressive Animation & Chime]
         end
     end
 
     subgraph Physical Hardware
         Spooler --> DefaultP[System Default Printer]
-        Spooler --> BWPrinter[Monochrome Laser Printer]
-        Spooler --> ColorPrinter[Color Inkjet / Laser Printer]
-        Spooler --> PhotoPrinter[Dedicated Photo / Glossy Printer]
+        Spooler --> BWPrinter[Monochrome Printer]
+        Spooler --> ColorPrinter[Color Printer]
+        Spooler --> PhotoPrinter[Dedicated Photo Printer]
     end
 
-    subgraph Windows Service Lifecycle
-        TaskSched[Windows Task Scheduler: AutoPrintAgent] -->|Boot Trigger| AgentProcess[KluffPrintAgent.exe]
-        Watchdog[Windows Task Scheduler: AutoPrintWatchdog] -->|Every 5 Mins| VBScript[watchdog.vbs]
-        VBScript -->|WMI Process Check & Revive| AgentProcess
+    subgraph Windows 24/7 Resilience
+        Registry[Windows Auto-Start: HKCU Run Key] -->|Auto-Boot| AgentProcess[KluffPrintAgent.exe]
+        PwrMgmt[Windows Kernel: SetThreadExecutionState] -->|Prevent Sleep| AgentProcess
+        Wakeup[1-Second Tick Suspension Watchdog] -->|300ms Reconnect| WSClient
     end
 ```
 
 ---
 
-## 2. Core Modules & Components
+## 2. Core Modular Structure (`src/`)
 
-### 2.1 Socket Client & Auto-Healing Sync (`index.js`)
+### 2.1 `src/socketClient.js` — Cloud Stream & Auto-Healing Sync
 * **Persistent Bi-Directional Stream:** Connects to the cloud server via Socket.io with aggressive reconnection (`reconnectionDelay: 1000`, `reconnectionDelayMax: 5000`).
-* **Initial Sync Request (`agent-request-pending-jobs`):** Immediately on connect/reconnect, broadcasts the agent's registration and requests any pending or stale jobs that were created while the agent PC was offline.
-* **Download Retry Engine:** Implements exponential backoff (3 attempts) with integrity checks to download PDF/image assets safely before submitting to Windows spooler.
+* **15s Active NAT Keep-Alive:** Emits `agent-ping` every 15s to keep router NAT tables open indefinitely, guaranteeing instant reception even after 6+ hours of inactivity.
+* **Sleep / Wakeup Watchdog:** A 1-second interval monitors clock skew. If the PC resumes from sleep/suspend, it forces a clean reconnect in under 300ms.
+* **Founder Killswitch:** Listens for `agent-control-command` (`LOCK` / `UNLOCK`) from the platform founder dashboard.
 
-### 2.2 Local Queue Manager (`job-queue.json`)
-* Protects print jobs against unexpected PC shutdowns, power cuts, or network dropouts.
-* Incoming jobs are immediately persisted to `job-queue.json`.
-* State transitions: `QUEUED` ➔ `DOWNLOADING` ➔ `SPOOLING` ➔ `COMPLETED` / `FAILED`.
-* Completed jobs are archived and local temporary download caches are purged.
+### 2.2 `src/toastService.js` — Zero-Console Floating Desktop Toast
+* Autonomous floating WPF card sliding up in the bottom-right corner above the taskbar.
+* Clean modern layout: File metadata, page count, price, copies, and payment badge (`UPI Mode` / `Cash Mode`).
+* 5-step animated timeline with checkmarks and timestamps.
+* Audio chime (`System.Media.SystemSounds.Asterisk`) on arrival.
+* 15-second countdown dismiss button (`Close (15)`).
+* Pure GUI execution: Spawned with `shell: false, windowsHide: true` so no black command prompt is ever created.
 
-### 2.3 Hardware Discovery & Role-Based Routing
-* Discovers installed physical and network printers dynamically via PowerShell:
+### 2.3 `src/printerService.js` — Windows Printer Discovery & Spooling
+* Discovers all physical and network printers dynamically via PowerShell:
   ```powershell
-  Get-CimInstance Win32_Printer | Select-Object Name, Default, PrinterStatus, PortName
+  Get-CimInstance Win32_Printer | Select-Object Name, DeviceID, Default
   ```
-* **Dynamic Role Matrix (`config.json`):**
-  * `defaultPrinter`: Fallback for general jobs.
-  * `bwPrinter`: Automatically assigned to black-and-white impressions.
-  * `colorPrinter`: Automatically assigned to color impressions.
-  * `photoPrinter`: Assigned when customer selects photo print mode.
-  * `largeFormatPrinter`: Assigned for A3, A2, or A1 paper formats.
-
-### 2.4 Built-In Local Web UI (`http://localhost:5050`)
-* Zero external web framework dependencies — runs directly on Node's native HTTP engine.
-* **REST APIs:**
-  * `GET /api/status`: Real-time cloud connectivity status, queue counts, and recent logs.
-  * `GET /api/printers`: Discovered hardware printers and active role assignments.
-  * `POST /api/printers/assign`: Updates printer routing rules on the fly without restarting the agent.
-  * `POST /api/test-print`: Sends a 1-page alignment and diagnostic sheet directly to any printer.
-  * `GET /api/queue`: Inspects real-time queue states and allows manual job retry.
-
-### 2.5 Silent Execution & SumatraPDF Spooling
-* Uses an integrated SumatraPDF executable to issue silent print instructions without displaying popup dialogues or dialog windows:
+* Direct silent spooling via bundled SumatraPDF without printer dialog popups:
   ```cmd
-  SumatraPDF.exe -print-to "<PRINTER_NAME>" -print-settings "<PAGES>,<DUPLEX_MODE>,paper=<SIZE>" "<FILE_PATH>"
+  SumatraPDF.exe -print-to "<PRINTER_NAME>" -silent "<FILE_PATH>"
   ```
-* Handles page extraction, orientation corrections, and duplex discounts (`duplex: duplexlong` / `duplexshort`).
+
+### 2.4 `src/imageProcessor.js` — BT.601 High-Definition Photo Grayscale
+* Converts photos (JPG, PNG, WebP) to high-definition BT.601 perceptual grayscale using Windows GDI ColorMatrix.
+* Preserves skin tones, shadows, and midtones with realistic photographic depth on monochrome printers.
+
+### 2.5 `src/activationService.js` — 1-Click Terminal Pairing
+* White & Emerald Green modal dialog (`activate-ui.ps1`) for pairing the counter PC to a shop profile via its unique QR token.
+
+### 2.6 `src/mutex.js` — Single Instance Guard
+* TCP server listening on `127.0.0.1:5055` ensuring strictly one agent instance runs per PC.
+
+### 2.7 `src/hardware.js` — Machine Fingerprinting
+* Queries Motherboard UUID or `MachineGuid` to prevent token hijacking.
 
 ---
 
-## 3. Windows Service & Auto-Start Architecture
+## 3. Zero-Touch Windows Auto-Start Deployment
 
-To guarantee 24/7 reliability in retail shops without operator intervention, three automated scripts manage the Windows lifecycle:
-
-| File | Purpose |
-|---|---|
-| `install-service.bat` | One-click administrative setup. Registers Task Scheduler tasks, creates XML definitions, and enables High-Performance Power Plan. |
-| `uninstall-service.bat` | Cleans up and deletes Task Scheduler tasks and restores default balanced power plan. |
-| `watchdog.vbs` | Headless, silent VBScript executed every 5 minutes by Task Scheduler. Queries WMI process list for `KluffPrintAgent.exe` and restarts it if closed. |
-
-### Windows Power Management Configuration:
-```cmd
-powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
-powercfg /change standby-timeout-ac 0
-powercfg /change standby-timeout-dc 0
-powercfg /change monitor-timeout-ac 0
-powercfg /change hibernate-timeout-ac 0
-powercfg /hibernate off
-```
-*Prevents counter PCs from going to sleep or disabling USB/Network ports while waiting for orders.*
-
----
-
-## 4. Configuration Schema (`config.json`)
-
-```json
-{
-  "serverUrl": "http://localhost:5000",
-  "shopToken": "test-shop-token-123",
-  "uiPort": 5050,
-  "printers": {
-    "defaultPrinter": "",
-    "bwPrinter": "",
-    "colorPrinter": "",
-    "photoPrinter": "",
-    "largeFormatPrinter": ""
-  },
-  "logLevel": "info",
-  "maxConcurrentJobs": 2
-}
-```
-
----
-
-## 5. Standalone Binary Compilation
-
-To build a zero-dependency `.exe` for deployment on customer PCs without installing Node.js:
-```bash
-cd print-agent
-npm run build
-```
-* Compiles `index.js` and embedded assets into `KluffPrintAgent.exe` (~78 MB self-contained binary).
+To install the agent permanently on counter PCs:
+1. Double-click **`install-autostart.bat`**.
+2. Automatically registers `KluffPrintAgent.exe` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+3. Sets Windows Power Policy (`powercfg /change standby-timeout-ac 0`) so the counter PC never sleeps on AC power.
+4. On every PC reboot, the agent launches silently in the background with zero clicks.
