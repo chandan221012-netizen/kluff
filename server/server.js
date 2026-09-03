@@ -4,6 +4,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const mongoose = require('mongoose');
 const path = require('path');
+const fs = require('fs');
 const cors = require('cors');
 const seedTestData = require('./utils/seedTestData');
 const printJobRoutes = require('./routes/printJob');
