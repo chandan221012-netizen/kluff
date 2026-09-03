@@ -19,7 +19,16 @@ function promptTerminalActivation(serverUrl) {
       '-File', scriptPath,
       '-ServerUrl', serverUrl,
       '-OutputFile', resultFile
-    ], { windowsHide: false, timeout: 300000 }, (err) => {
+    ], { windowsHide: false, timeout: 300000 }, (err, stdout, stderr) => {
+      if (err) {
+        Logger.err('[Activation]', `PowerShell process exited with error: ${err.message}`);
+      }
+      if (stderr && stderr.trim()) {
+        Logger.err('[Activation]', `PowerShell stderr: ${stderr.trim()}`);
+      }
+      if (stdout && stdout.trim()) {
+        Logger.info('[Activation]', `PowerShell stdout: ${stdout.trim()}`);
+      }
       try {
         if (fs.existsSync(resultFile)) {
           const raw = fs.readFileSync(resultFile, 'utf8').replace(/^\uFEFF/, '').trim();

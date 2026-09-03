@@ -53,23 +53,32 @@ function saveConfig(cfg) {
 // Unpack bundled scripts to AGENT_DIR so PowerShell can execute them
 function unpackAssets() {
   ensureDirectories();
-  const scriptsToUnpack = ['activate-ui.ps1', 'toast-ui.ps1', 'convert-gray.ps1', 'keep-awake.ps1'];
+  const scriptsToUnpack = [
+    'activate-ui.ps1',
+    'toast-ui.ps1',
+    'convert-gray.ps1',
+    'keep-awake.ps1',
+    'preview-toast.ps1'
+  ];
   
   for (const script of scriptsToUnpack) {
     const targetPath = path.join(AGENT_DIR, script);
     const candidatePaths = [
       path.join(ROOT_DIR, 'scripts', script),
       path.join(ROOT_DIR, script),
-      path.join(__dirname, '..', 'scripts', script)
+      path.join(__dirname, '..', 'scripts', script),
+      path.join(__dirname, 'scripts', script),
+      path.join(__dirname, script)
     ];
 
     for (const cand of candidatePaths) {
-      if (fs.existsSync(cand)) {
-        try {
-          fs.copyFileSync(cand, targetPath);
+      try {
+        if (fs.existsSync(cand)) {
+          const content = fs.readFileSync(cand);
+          fs.writeFileSync(targetPath, content);
           break;
-        } catch (_) {}
-      }
+        }
+      } catch (_) {}
     }
   }
 }

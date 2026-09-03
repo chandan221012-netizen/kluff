@@ -39,6 +39,7 @@ async function main() {
   if (!cfg.shopToken) {
     const activation = await promptTerminalActivation(cfg.serverUrl);
     if (activation && activation.shopToken) {
+      if (activation.serverUrl) cfg.serverUrl = activation.serverUrl;
       cfg.shopToken = activation.shopToken;
       cfg.shopId = activation.shopId || '';
       cfg.hardwareId = activation.hardwareId || '';
