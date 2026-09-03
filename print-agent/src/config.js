@@ -6,7 +6,7 @@ const IS_PKG = !!process.pkg;
 const ROOT_DIR = IS_PKG ? path.dirname(process.execPath) : path.resolve(__dirname, '..');
 const CONFIG_PATH = path.join(ROOT_DIR, 'config.json');
 const LOG_FILE = path.join(ROOT_DIR, 'agent.log');
-const DEFAULT_SERVER = 'http://localhost:5000';
+const DEFAULT_SERVER = 'https://kluff.onrender.com';
 const MUTEX_PORT = 5055;
 const MAX_JOBS = 2;
 
