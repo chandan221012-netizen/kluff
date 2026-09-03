@@ -28,7 +28,11 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Serve uploaded document files statically
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+app.use('/uploads', express.static(UPLOADS_DIR));
 
 // Attach io instance to express app for access inside route controllers
 app.set('io', io);

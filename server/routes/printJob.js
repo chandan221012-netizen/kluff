@@ -11,10 +11,15 @@ const PrintJob = require('../models/PrintJob');
 const QRSession = require('../models/QRSession');
 const { getConnectedAgent, resolveTargetPrinter } = require('../sockets/agentSocket');
 
+const UPLOADS_DIR = path.join(__dirname, '../uploads');
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+
 // Configure disk storage for incoming uploaded files
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/');
+    cb(null, UPLOADS_DIR);
   },
   filename: (req, file, cb) => {
     cb(null, `${Date.now()}-${uuidv4()}${path.extname(file.originalname)}`);
@@ -195,7 +200,7 @@ const handleSubmitJob = async (req, res) => {
         batchId,
         shopId: shop.shopId,
         printerId: printer ? printer.printerId : 'DEFAULT_PRINTER',
-        filePath: file.path.replace(/\\/g, '/'),
+        filePath: `uploads/${file.filename}`,
         originalFileName: file.originalname,
         fileType: file.mimetype,
         jobType: jobType || 'document',
