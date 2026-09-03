@@ -7,6 +7,12 @@ node_modules/
 .env.local
 *.env
 
+*.exe
+node_modules/
+config.json
+temp_*.pdf
+*.log
+
 # Build outputs
 dist/
 build/
