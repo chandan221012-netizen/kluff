@@ -228,6 +228,8 @@ const handleSubmitJob = async (req, res) => {
     const ioInstance = req.app.get('io');
     const routing = shop.printerRouting || {};
 
+    const serverBaseUrl = (process.env.SERVER_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+
     for (const job of createdJobs) {
       if (agentSocketId && ioInstance) {
         const targetPrinter = resolveTargetPrinter(routing, job);
@@ -236,7 +238,7 @@ const handleSubmitJob = async (req, res) => {
           batchId: job.batchId,
           printerId: job.printerId,
           systemPrinterName: targetPrinter || (printer ? printer.systemPrinterName : undefined) || 'Default Printer Name',
-          fileUrl: `${process.env.SERVER_URL || 'http://localhost:5000'}/${job.filePath}`,
+          fileUrl: `${serverBaseUrl}/${job.filePath}`,
           originalFileName: job.originalFileName,
           fileType: job.fileType,
           jobType: job.jobType,
