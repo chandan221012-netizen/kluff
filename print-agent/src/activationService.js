@@ -16,6 +16,7 @@ function promptTerminalActivation(serverUrl) {
     execFile(PS_EXE, [
       '-NoProfile',
       '-ExecutionPolicy', 'Bypass',
+      '-Sta',
       '-File', scriptPath,
       '-ServerUrl', serverUrl,
       '-OutputFile', resultFile
