@@ -178,9 +178,10 @@ function initSocket(io) {
     });
 
     // ── Agent reports discovered Windows printers ──
-    socket.on('agent-report-printers', async (data) => {
+    const handlePrintersReport = async (data) => {
       try {
-        const printers = Array.isArray(data) ? data : (data?.printers || []);
+        let rawPrinters = Array.isArray(data) ? data : (data?.printers || []);
+        const printers = rawPrinters.map(p => typeof p === 'object' ? (p.name || p.deviceId || '') : String(p)).filter(Boolean);
         console.log(`[Agent] Reported ${printers.length} printer(s) for shop ${socket.shopId}`);
 
         await Shop.updateOne(
@@ -193,10 +194,19 @@ function initSocket(io) {
           printers,
           shopId: socket.shopId
         });
+        if (socket.shopDbId && socket.shopDbId !== socket.shopId) {
+          io.to(`shop_${socket.shopDbId}`).emit('agent-printers-updated', {
+            printers,
+            shopId: socket.shopDbId
+          });
+        }
       } catch (err) {
         console.error('Error saving reported printers:', err.message);
       }
-    });
+    };
+
+    socket.on('agent-report-printers', handlePrintersReport);
+    socket.on('printer-status', handlePrintersReport);
 
     // ── Helper: dispatch all pending & stale SENT_TO_AGENT jobs to this agent ──
     async function dispatchPendingJobs() {

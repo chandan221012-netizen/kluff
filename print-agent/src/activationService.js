@@ -22,11 +22,14 @@ function promptTerminalActivation(serverUrl) {
     ], { windowsHide: false, timeout: 300000 }, (err) => {
       try {
         if (fs.existsSync(resultFile)) {
-          const res = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+          const raw = fs.readFileSync(resultFile, 'utf8').replace(/^\uFEFF/, '').trim();
+          const res = JSON.parse(raw);
           try { fs.unlinkSync(resultFile); } catch (_) {}
           return resolve(res);
         }
-      } catch (_) {}
+      } catch (e) {
+        Logger.err('[Activation]', 'Failed to parse activation result:', e.message);
+      }
       resolve(null);
     });
   });

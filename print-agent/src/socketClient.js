@@ -172,8 +172,10 @@ function initSocketClient(cfg) {
 
     // Discover and sync local Windows printers
     const printers = await discoverPrinters();
+    const printerNames = printers.map(p => typeof p === 'object' ? (p.name || p.deviceId || '') : String(p)).filter(Boolean);
     Logger.info('[Printers]', `Discovered ${printers.length} printer(s). Syncing with cloud...`);
-    socket.emit('printer-status', { printers, isOnline: true });
+    socket.emit('printer-status', { printers: printerNames, isOnline: true });
+    socket.emit('agent-report-printers', { printers: printerNames });
   });
 
   socket.on('agent-pong', () => {

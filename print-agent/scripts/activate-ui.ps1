@@ -1,4 +1,4 @@
-﻿param (
+param (
     [Parameter(Mandatory=$true)][string]$ServerUrl,
     [Parameter(Mandatory=$true)][string]$OutputFile
 )
@@ -142,12 +142,13 @@ $activateBtn.Add_Click({
             $errorBanner.Visibility = [System.Windows.Visibility]::Collapsed
             
             # Save token to OutputFile
-            @{
+            $outJson = @{
                 shopToken = $res.qrToken
                 shopId = $res.shopId
                 shopName = $res.shopName
                 hardwareId = $hwId
-            } | ConvertTo-Json | Set-Content -Path $OutputFile -Encoding UTF8
+            } | ConvertTo-Json
+            [System.IO.File]::WriteAllText($OutputFile, $outJson, [System.Text.UTF8Encoding]::new($false))
 
             # Close dialog after 1.5 seconds
             $timer = New-Object System.Windows.Threading.DispatcherTimer

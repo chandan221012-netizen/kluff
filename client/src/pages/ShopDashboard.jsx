@@ -5,7 +5,7 @@ import io from 'socket.io-client';
 import { 
   QrCode, Printer, Plus, Loader2, 
   TrendingUp, Layers, RefreshCw, IndianRupee, Save, CheckCircle2,
-  Download, LogOut, FileText, Image as ImageIcon, Sparkles, Trash2
+  Download, LogOut, FileText, Image as ImageIcon, Sparkles, Trash2, Copy
 } from 'lucide-react';
 import { SERVER_URL } from '../config';
 
@@ -16,6 +16,7 @@ export default function ShopDashboard() {
   const [recentJobs, setRecentJobs] = useState([]);
   const [errorMsg, setErrorMsg] = useState('');
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [copiedToken, setCopiedToken] = useState(false);
   const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'queue' | 'printers' | 'poster'
 
   // Form states
@@ -217,6 +218,13 @@ export default function ShopDashboard() {
     window.print();
   };
 
+  const handleCopyToken = () => {
+    if (!stats?.qrToken) return;
+    navigator.clipboard.writeText(stats.qrToken);
+    setCopiedToken(true);
+    setTimeout(() => setCopiedToken(false), 2000);
+  };
+
   // Dynamic LAN IP resolution: If accessed via localhost, use the detected Wi-Fi LAN IP
   // so any mobile phone connected to the same Wi-Fi network opens the print screen immediately!
   const lanIp = stats?.serverIp || '10.91.1.121';
@@ -266,7 +274,16 @@ export default function ShopDashboard() {
             <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-600 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-100">
               ● Online Relay
             </span>
-            <span className="text-xs text-slate-400 font-mono">Token: {stats?.qrToken?.substring(0, 8)}...</span>
+            {stats?.qrToken && (
+              <button
+                onClick={handleCopyToken}
+                className="inline-flex items-center gap-1.5 px-2.5 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-mono font-bold rounded-full border border-slate-200 transition-all active:scale-95"
+                title="Click to copy full shop token"
+              >
+                {copiedToken ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5 text-slate-500" />}
+                <span>{copiedToken ? 'Token Copied!' : `Token: ${stats.qrToken}`}</span>
+              </button>
+            )}
           </div>
           <h1 className="text-2xl font-black text-slate-900 mt-1">{stats?.shopName}</h1>
           <p className="text-xs text-slate-400 font-medium">AUTOPRINT Terminal Hub & Queue Manager</p>
@@ -388,7 +405,7 @@ export default function ShopDashboard() {
               : 'border-transparent text-slate-400 hover:text-slate-600'
           }`}
         >
-          Printers ({stats?.printers?.length || 0})
+          Printers ({availablePrinters?.length || stats?.availablePrinters?.length || 0})
         </button>
       </div>
 
@@ -587,6 +604,19 @@ export default function ShopDashboard() {
               <p className="text-xs text-slate-300 leading-relaxed">
                 Run this silent agent on the Windows PC connected to your printers. It runs 100% in the background without any local browser window, discovers your printers, and prints orders instantly.
               </p>
+              {stats?.qrToken && (
+                <div className="pt-2 flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] text-indigo-300 font-bold uppercase tracking-wider">Your Shop Token:</span>
+                  <button
+                    onClick={handleCopyToken}
+                    className="inline-flex items-center gap-2 px-3 py-1.5 bg-white/10 hover:bg-white/20 text-emerald-300 font-mono text-xs font-bold rounded-xl border border-white/20 transition-all active:scale-95 shadow-inner"
+                    title="Click to copy full shop token"
+                  >
+                    {copiedToken ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-indigo-300" />}
+                    <span>{copiedToken ? 'Copied to Clipboard!' : stats.qrToken}</span>
+                  </button>
+                </div>
+              )}
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <a
@@ -633,12 +663,15 @@ export default function ShopDashboard() {
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Discovered Printers ({availablePrinters.length}):</span>
               {availablePrinters.length > 0 ? (
-                availablePrinters.map((pName, idx) => (
-                  <span key={idx} className="px-2.5 py-1 bg-slate-100 text-slate-700 font-semibold text-xs rounded-lg border border-slate-200 flex items-center gap-1.5">
-                    <Printer className="w-3 h-3 text-slate-500" />
-                    {pName}
-                  </span>
-                ))
+                availablePrinters.map((p, idx) => {
+                  const pName = typeof p === 'object' ? (p.name || p.deviceId || '') : String(p);
+                  return (
+                    <span key={idx} className="px-2.5 py-1 bg-slate-100 text-slate-700 font-semibold text-xs rounded-lg border border-slate-200 flex items-center gap-1.5">
+                      <Printer className="w-3 h-3 text-slate-500" />
+                      {pName}
+                    </span>
+                  );
+                })
               ) : (
                 <span className="text-xs text-slate-400 italic">No printers reported yet</span>
               )}
