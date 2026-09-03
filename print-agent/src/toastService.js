@@ -17,6 +17,7 @@ function spawnToast(job) {
     const args = [
       '-NoProfile',
       '-ExecutionPolicy', 'Bypass',
+      '-Sta',
       '-File', script,
       '-JobId', String(job.jobId || 'JOB_PRINT'),
       '-Filename', cleanFilename,

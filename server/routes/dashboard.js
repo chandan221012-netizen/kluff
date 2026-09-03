@@ -228,21 +228,32 @@ router.get('/download-agent', async (req, res) => {
 });
 
 // GET /api/dashboard/agent-config - Download tailored config.json with current shop token
-router.get('/agent-config', authenticateShop, async (req, res) => {
+router.get('/agent-config', async (req, res) => {
   try {
-    const shop = await Shop.findOne({ shopId: req.shopId });
+    const authHeader = req.headers.authorization;
+    const token = (authHeader && authHeader.startsWith('Bearer ')) ? authHeader.split(' ')[1] : req.query.token;
+
+    let shop = null;
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        shop = await Shop.findOne({ shopId: decoded.shopId });
+      } catch (_) {}
+    }
+    if (!shop && req.query.shopToken) {
+      shop = await Shop.findOne({ qrToken: req.query.shopToken });
+    }
+    if (!shop) {
+      shop = await Shop.findOne({ isActive: true }).sort({ updatedAt: -1 });
+    }
     if (!shop) return res.status(404).json({ error: 'Shop not found' });
 
+    const hostIp = process.env.SERVER_IP || '192.168.156.147';
     const config = {
-      serverUrl: process.env.SERVER_URL || 'http://localhost:5000',
+      serverUrl: process.env.SERVER_URL || `http://${hostIp}:5000`,
       shopToken: shop.qrToken,
-      printers: {
-        defaultPrinter: '',
-        bwPrinter: '',
-        colorPrinter: '',
-        photoPrinter: '',
-        largeFormatPrinter: ''
-      }
+      shopId: shop.shopId,
+      printers: shop.printerRouting || {}
     };
 
     res.setHeader('Content-Type', 'application/json');

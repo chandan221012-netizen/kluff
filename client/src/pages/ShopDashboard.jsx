@@ -225,6 +225,26 @@ export default function ShopDashboard() {
     setTimeout(() => setCopiedToken(false), 2000);
   };
 
+  const handleDownloadConfig = () => {
+    if (!stats?.qrToken) return;
+    const hostIp = stats.serverIp || '192.168.156.147';
+    const configData = {
+      serverUrl: `http://${hostIp}:5000`,
+      shopToken: stats.qrToken,
+      shopId: stats.shopId || '',
+      printers: stats.printerRouting || {}
+    };
+    const blob = new Blob([JSON.stringify(configData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'config.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   // Dynamic LAN IP resolution: If accessed via localhost, use the detected Wi-Fi LAN IP
   // so any mobile phone connected to the same Wi-Fi network opens the print screen immediately!
   const lanIp = stats?.serverIp || '10.91.1.121';
@@ -626,14 +646,13 @@ export default function ShopDashboard() {
               >
                 <Download className="w-4 h-4" /> Download Agent (.exe)
               </a>
-              <a
-                href={`${SERVER_URL}/api/dashboard/agent-config`}
-                download="config.json"
+              <button
+                onClick={handleDownloadConfig}
                 className="bg-white/10 hover:bg-white/20 text-white text-xs font-bold px-4 py-3 rounded-xl border border-white/10 flex items-center gap-2 transition-all active:scale-95"
                 title="Download preconfigured config.json file with your shop token"
               >
                 <FileText className="w-4 h-4" /> Shop Config (.json)
-              </a>
+              </button>
             </div>
           </div>
 
