@@ -84,8 +84,18 @@ function unpackAssets() {
 }
 
 function getScriptPath(scriptName) {
+  // If running in development or from source (node index.js), ALWAYS prioritize the local workspace scripts!
+  if (!IS_PKG) {
+    const rootPath = path.join(ROOT_DIR, 'scripts', scriptName);
+    if (fs.existsSync(rootPath)) return rootPath;
+    const directPath = path.join(ROOT_DIR, scriptName);
+    if (fs.existsSync(directPath)) return directPath;
+  }
+
+  // If running as packaged binary (.exe), use freshly unpacked AGENT_DIR script
   const tempPath = path.join(AGENT_DIR, scriptName);
   if (fs.existsSync(tempPath)) return tempPath;
+
   const rootPath = path.join(ROOT_DIR, 'scripts', scriptName);
   if (fs.existsSync(rootPath)) return rootPath;
   return path.join(ROOT_DIR, scriptName);
